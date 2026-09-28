@@ -116,10 +116,12 @@ fn tun(layout: &CoreLayout) -> Value {
 /// На Windows то же делают постоянные фильтры WFP, и страж не нужен.
 pub fn compile_guard(settings: &Settings, layout: &CoreLayout) -> Value {
     let mut rules = lan_rules();
-    if settings.kill_switch.enabled {
+    if ks_active(settings) {
         for p in settings.kill_switch.programs.iter().filter(|p| p.enabled) {
             rules.push(format!("PROCESS-PATH-REGEX,{},REJECT", folder_regex(layout.os, &p.folder)));
         }
+        // Не узнали программу — считаем её защищённой: лучше не пустить чужую, чем выпустить свою.
+        rules.push(format!("{UNKNOWN_PROCESS},REJECT"));
     }
     rules.push("MATCH,DIRECT".into());
     json!({
@@ -141,6 +143,16 @@ pub fn compile_guard(settings: &Settings, layout: &CoreLayout) -> Value {
         },
         "rules": rules,
     })
+}
+
+/// Соединение, для которого ядро не узнало программу. На macOS ядро узнаёт её по внутренним структурам
+/// системы; если на новой версии macOS они поменяются, программу не узнать — и Kill Switch не должен
+/// превратиться в «пропустить напрямую».
+pub const UNKNOWN_PROCESS: &str = "NOT,((PROCESS-PATH-REGEX,.+))";
+
+/// В Kill Switch есть включённые программы.
+pub fn ks_active(s: &Settings) -> bool {
+    s.kill_switch.enabled && s.kill_switch.programs.iter().any(|p| p.enabled)
 }
 
 fn controller_key(os: Os) -> &'static str {
@@ -299,6 +311,10 @@ pub fn rules(s: &Settings, catalog: &Catalog, os: Os) -> Vec<String> {
         for p in s.kill_switch.programs.iter().filter(|p| p.enabled) {
             out.push(format!("PROCESS-PATH-REGEX,{},{VPN_GROUP}", folder_regex(os, &p.folder)));
         }
+    }
+    // macOS: программа не узнана — только через VPN, никогда напрямую (на Windows то же держит WFP).
+    if os == Os::MacOs && ks_active(s) {
+        out.push(format!("{UNKNOWN_PROCESS},{VPN_GROUP}"));
     }
 
     // Ядро берёт первое совпавшее правило, поэтому внутри списка точное идёт раньше общего:
@@ -699,8 +715,23 @@ mod tests {
         assert!(g.get("proxy-providers").is_none() && g.get("mixed-port").is_none());
         assert_eq!(g["external-controller-unix"], "/Library/Application Support/klick/run/core.sock");
 
+        assert!(rules.contains(&"NOT,((PROCESS-PATH-REGEX,.+)),REJECT"), "не узнали программу — не выпускать");
+        assert!(rules.iter().position(|r| r.contains("Telegram")) < rules.iter().position(|r| r.starts_with("NOT,")));
+
         s.kill_switch.enabled = false;
         let off = compile_guard(&s, &mac_layout());
         assert!(!off["rules"].as_array().unwrap().iter().any(|r| r.as_str().unwrap().contains("REJECT")));
+    }
+
+    #[test]
+    fn unknown_programs_go_through_vpn_only_on_macos_with_kill_switch() {
+        let mut s = Settings::default();
+        let unknown = format!("{UNKNOWN_PROCESS},{VPN_GROUP}");
+        assert!(!rules(&s, &catalog(), Os::MacOs).contains(&unknown), "пустой Kill Switch ничего не меняет");
+        s.kill_switch.programs.push("/Applications/Telegram.app".into());
+        let r = rules(&s, &catalog(), Os::MacOs);
+        let at = r.iter().position(|x| *x == unknown).expect("правило для неузнанных");
+        assert!(position(&r, "Telegram") < at && at < position(&r, "MATCH"));
+        assert!(!rules(&s, &catalog(), Os::Windows).iter().any(|x| x.starts_with("NOT,")), "на Windows это держит WFP");
     }
 }

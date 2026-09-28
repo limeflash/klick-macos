@@ -7,7 +7,7 @@
 //! (так же, как объект задания на Windows).
 
 use crate::paths::{Paths, Profile};
-use crate::{engine, netconf, pipe, sys};
+use crate::{engine, netconf, pf, pipe, sys};
 use anyhow::{bail, Context, Result};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -131,8 +131,10 @@ pub fn uninstall(wipe: bool) -> Result<()> {
     stop();
     let _ = std::fs::remove_file(PLIST);
     // Служба при остановке сама возвращает прокси и DNS; если она была мертва — вернуть по отметкам.
+    // Правила Kill Switch в pf служба при остановке нарочно оставляет — снять их при удалении.
     let data = Path::new(crate::paths::DATA_DIR);
     let _ = netconf::restore_leftovers(data);
+    let _ = pf::clear(data);
     let _ = std::fs::remove_file(klick_proto::SOCKET);
     if Path::new(INSTALL_DIR).exists() {
         std::fs::remove_dir_all(INSTALL_DIR)?;
@@ -144,13 +146,18 @@ pub fn uninstall(wipe: bool) -> Result<()> {
     Ok(())
 }
 
-/// Вернуть прокси и DNS, которые поменял kl!ck (по отметкам в папке данных).
+/// Вернуть прокси и DNS, которые поменял kl!ck (по отметкам в папке данных), и снять правила Kill Switch в pf.
+/// Запасной выход, если служба не отвечает, а Kill Switch держит интернет закрытым. Если служба
+/// работает и Kill Switch включён, она поставит правила снова — сначала выключите Kill Switch в окне.
 pub fn cleanup_network() -> Result<()> {
     if !sys::is_elevated() {
         bail!("нужны права администратора");
     }
-    let (proxy, dns) = netconf::restore_leftovers(Path::new(crate::paths::DATA_DIR));
-    println!("прокси возвращён: {} · DNS возвращён: {}", if proxy { "да" } else { "нечего" }, if dns { "да" } else { "нечего" });
+    let data = Path::new(crate::paths::DATA_DIR);
+    let (proxy, dns) = netconf::restore_leftovers(data);
+    let pf = pf::clear(data);
+    let said = |b: bool| if b { "да" } else { "нечего" };
+    println!("прокси возвращён: {} · DNS возвращён: {} · правила Kill Switch сняты: {}", said(proxy), said(dns), said(pf));
     Ok(())
 }
 

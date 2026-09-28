@@ -122,7 +122,7 @@ export function Sheet({ onClose, children, tall }: { onClose: () => void; childr
 }
 
 export function Offline() {
-  const { serviceUp, transport } = useStore();
+  const { serviceUp, transport, state } = useStore();
   if (serviceUp) return null;
   return (
     <div className="offline">
@@ -131,6 +131,9 @@ export function Offline() {
         {transport.kind === 'tauri'
           ? 'Окно работает, но без службы VPN не включить. Переустановите kl!ck или перезагрузите компьютер.'
           : 'Тестовая служба недоступна.'}
+        {transport.kind === 'tauri' && isMac && state?.kill_switch
+          ? ' Если в Kill Switch есть программы, прямые подключения закрыты, пока служба не вернётся.'
+          : null}
       </span>
     </div>
   );

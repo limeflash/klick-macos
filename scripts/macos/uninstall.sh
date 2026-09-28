@@ -18,6 +18,8 @@ elif [[ -x "$bundled" ]]; then
 else
     /bin/launchctl bootout system/app.klick.service 2>/dev/null || true
     rm -f /Library/LaunchDaemons/app.klick.service.plist
+    # Правила Kill Switch в брандмауэре pf служба нарочно оставляет при остановке — снять.
+    /sbin/pfctl -q -a com.apple/090.klick -F all 2>/dev/null || true
     rm -rf /Library/PrivilegedHelperTools/klick
     [[ -n "$wipe" ]] && rm -rf "/Library/Application Support/klick"
 fi

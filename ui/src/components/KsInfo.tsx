@@ -117,6 +117,12 @@ export function KsInfo({ vpnOn, routing, protectedCount, onClose }: { vpnOn: boo
             На Mac защиту держит сам kl!ck: пока VPN выключен, трафик проходит через него — защищённые программы он не выпускает, остальные идут напрямую.
           </div>
         )}
+        {isMac ? (
+          <div>
+            <i style={{ background: 'var(--red)' }} />
+            Если kl!ck или VPN дадут сбой, прямые подключения закроет брандмауэр macOS: пока kl!ck не восстановится, интернет будет только в локальной сети — у всех программ, а не только у защищённых.
+          </div>
+        ) : null}
       </div>
       <div className="sheet-actions" style={{ marginTop: 16 }}>
         <button onClick={onClose}>Понятно</button>

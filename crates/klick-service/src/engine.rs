@@ -10,6 +10,8 @@ use crate::logring;
 use crate::neighbors;
 #[cfg(unix)]
 use crate::netconf;
+#[cfg(unix)]
+use crate::pf;
 use crate::netwatch::NetWatch;
 use crate::paths::{Paths, Profile};
 use crate::programs;
@@ -49,6 +51,12 @@ pub enum Msg {
     /// macOS: ядро-страж Kill Switch завершилось само.
     #[cfg(unix)]
     KsCoreExited { generation: u64 },
+    /// macOS: пора снова запустить стража после сбоя.
+    #[cfg(unix)]
+    KsRetry,
+    /// macOS: раз в 30 с проверить, что правила pf и страж на месте.
+    #[cfg(unix)]
+    KsWatchdog,
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -136,9 +144,14 @@ pub struct Engine {
     ks_core: Option<KsCore>,
     #[cfg(unix)]
     ks_generation: u64,
-    /// macOS: сколько раз подряд страж падал; после трёх — уведомление, без бесконечных перезапусков.
+    /// macOS: сколько раз подряд страж не запустился или упал — от этого пауза перед следующей попыткой.
     #[cfg(unix)]
     ks_failures: u8,
+    #[cfg(unix)]
+    ks_retry_pending: bool,
+    /// macOS: стоят ли правила Kill Switch в pf; `None` — ещё не сверяли (при запуске службы).
+    #[cfg(unix)]
+    pf_on: Option<bool>,
     /// macOS: DNS сетевых служб подменён на адрес внутри адаптера (режим VPN).
     #[cfg(unix)]
     dns_overridden: bool,
@@ -232,6 +245,21 @@ pub fn spawn(paths: Paths, profile: Profile) -> anyhow::Result<(EngineHandle, to
             None
         }
     };
+    // macOS: сторож Kill Switch — правила pf могла сбросить другая программа.
+    #[cfg(unix)]
+    {
+        let watch_tx = tx.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(30));
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                if watch_tx.send(Msg::KsWatchdog).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
     let engine_tx = tx.clone();
     tokio::spawn(async move {
         while net_rx.recv().await.is_some() {
@@ -264,6 +292,10 @@ pub fn spawn(paths: Paths, profile: Profile) -> anyhow::Result<(EngineHandle, to
         ks_generation: 0,
         #[cfg(unix)]
         ks_failures: 0,
+        #[cfg(unix)]
+        ks_retry_pending: false,
+        #[cfg(unix)]
+        pf_on: None,
         #[cfg(unix)]
         dns_overridden: false,
         servers: HashMap::new(),
@@ -403,6 +435,13 @@ impl Engine {
                         Msg::CoreExited { generation, code } => self.on_core_exit(generation, code).await,
                         #[cfg(unix)]
                         Msg::KsCoreExited { generation } => self.on_ks_core_exit(generation).await,
+                        #[cfg(unix)]
+                        Msg::KsRetry => {
+                            self.ks_retry_pending = false;
+                            self.sync_ks_core().await;
+                        }
+                        #[cfg(unix)]
+                        Msg::KsWatchdog => self.ks_watchdog().await,
                         Msg::Shutdown(done) => {
                             self.shutdown().await;
                             let _ = done.send(());
@@ -1243,6 +1282,14 @@ impl Engine {
         self.stop_core().await;
         #[cfg(unix)]
         self.stop_ks_core().await;
+        // Рабочая служба правила pf оставляет: остановка — это обновление, перезапуск или выключение Mac,
+        // и в это время прямых соединений быть не должно. Снимает их выключение Kill Switch и удаление.
+        // Служба для разработки за собой убирает, иначе у разработчика пропадёт интернет.
+        #[cfg(unix)]
+        if self.profile.dev && self.pf_on == Some(true) {
+            let data = self.paths.data.clone();
+            let _ = tokio::task::spawn_blocking(move || pf::clear(&data)).await;
+        }
     }
 
     // ── Kill Switch ────────────────────────────────────────────────────────
@@ -1392,12 +1439,59 @@ impl Engine {
         ks.programs.iter().filter(|p| p.enabled && Path::new(&p.folder).exists()).map(|p| p.folder.clone()).collect()
     }
 
+    /// Правила Kill Switch в pf: стоят, пока в Kill Switch есть программы, при любом состоянии VPN.
+    #[cfg(unix)]
+    async fn sync_pf(&mut self, want: bool) {
+        if self.pf_on == Some(want) {
+            return;
+        }
+        let data = self.paths.data.clone();
+        if want {
+            match tokio::task::spawn_blocking(move || pf::apply(&data)).await.map_err(anyhow::Error::from).and_then(|r| r) {
+                Ok(()) => {
+                    tracing::info!("Kill Switch: правила pf стоят — мимо адаптера ядра программы в интернет не выходят");
+                    self.pf_on = Some(true);
+                }
+                Err(e) => {
+                    tracing::error!("Kill Switch: правила pf не поставились: {e:#}");
+                    // Сторож попробует снова через 30 с; уведомление — один раз, а не на каждую попытку.
+                    if self.pf_on != Some(false) {
+                        self.notice("killswitch.failed", Value::Null);
+                    }
+                    self.pf_on = Some(false);
+                }
+            }
+        } else {
+            if tokio::task::spawn_blocking(move || pf::clear(&data)).await.unwrap_or(false) {
+                tracing::info!("Kill Switch: правила pf сняты");
+            }
+            self.pf_on = Some(false);
+        }
+    }
+
+    /// Раз в 30 с: правила pf на месте (их могла сбросить другая программа), страж работает.
+    #[cfg(unix)]
+    async fn ks_watchdog(&mut self) {
+        if !self.profile.wfp_allowed {
+            return;
+        }
+        if self.pf_on == Some(true) && !tokio::task::spawn_blocking(pf::active).await.unwrap_or(false) {
+            tracing::warn!("Kill Switch: правила pf пропали, ставлю снова");
+            self.pf_on = None;
+        }
+        if !self.ks_retry_pending {
+            self.sync_ks_core().await;
+        }
+    }
+
     /// Страж нужен, когда есть что закрывать, а TUN не держит основное ядро: VPN выключен
     /// или включён в режиме «Системный прокси». Состав программ меняется без перезапуска стража.
     #[cfg(unix)]
     async fn sync_ks_core(&mut self) {
+        let active = self.ks_folders();
+        self.sync_pf(!active.is_empty()).await;
         let main_tun = self.running.as_ref().is_some_and(|r| r.capture == Capture::Tun);
-        let folders = if main_tun { Vec::new() } else { self.ks_folders() };
+        let folders = if main_tun { Vec::new() } else { active };
         if folders.is_empty() {
             self.stop_ks_core().await;
             return;
@@ -1422,9 +1516,31 @@ impl Engine {
             Ok(n) => tracing::info!("Kill Switch: страж запущен, программ {n}"),
             Err(e) => {
                 tracing::error!("Kill Switch: страж не запустился: {e:#}");
-                self.notice("killswitch.failed", Value::Null);
+                self.ks_failed();
             }
         }
+    }
+
+    /// Страж не запустился или упал. Пока его нет, прямые соединения закрывает pf, поэтому
+    /// страж не бросаем: пробуем снова через 1, 2, 5, 10 с, дальше раз в 30 с. После третьей
+    /// неудачи подряд — уведомление: без стража интернета нет у всех программ пользователя.
+    #[cfg(unix)]
+    fn ks_failed(&mut self) {
+        const BACKOFF: [u64; 5] = [1, 2, 5, 10, 30];
+        self.ks_failures = self.ks_failures.saturating_add(1);
+        if self.ks_failures == 3 {
+            self.notice("killswitch.failed", Value::Null);
+        }
+        if self.ks_retry_pending {
+            return;
+        }
+        self.ks_retry_pending = true;
+        let delay = BACKOFF[(self.ks_failures as usize - 1).min(BACKOFF.len() - 1)];
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(delay)).await;
+            let _ = tx.send(Msg::KsRetry).await;
+        });
     }
 
     #[cfg(unix)]
@@ -1475,7 +1591,7 @@ impl Engine {
         }
     }
 
-    /// Страж упал сам: перезапустить; после трёх падений подряд — предупредить и не мучить систему.
+    /// Страж упал сам. Первый раз — сразу запустить снова, дальше — с паузами (`ks_failed`).
     #[cfg(unix)]
     async fn on_ks_core_exit(&mut self, generation: u64) {
         let Some(k) = self.ks_core.take_if(|k| k.generation == generation) else { return };
@@ -1484,13 +1600,12 @@ impl Engine {
             self.ks_failures = 0;
         }
         drop(k);
-        self.ks_failures += 1;
-        if self.ks_failures > 3 {
-            tracing::error!("Kill Switch: страж падает раз за разом, больше не запускаю");
-            self.notice("killswitch.failed", Value::Null);
-            return;
+        if self.ks_failures == 0 {
+            self.ks_failures = 1;
+            self.sync_ks_core().await;
+        } else {
+            self.ks_failed();
         }
-        self.sync_ks_core().await;
     }
 
     // ── Списки ─────────────────────────────────────────────────────────────

@@ -42,6 +42,9 @@ mod netconf;
 #[path = "unix/netwatch.rs"]
 mod netwatch;
 #[cfg(unix)]
+#[path = "unix/pf.rs"]
+mod pf;
+#[cfg(unix)]
 #[path = "unix/programs.rs"]
 mod programs;
 #[cfg(unix)]
@@ -94,7 +97,8 @@ enum Cmd {
     /// Убрать все фильтры Kill Switch из брандмауэра.
     #[cfg(windows)]
     CleanupWfp,
-    /// Вернуть системный прокси и DNS, которые поменял kl!ck (после сбоя или перед удалением).
+    /// Вернуть системный прокси и DNS, которые поменял kl!ck, и снять правила Kill Switch в pf
+    /// (после сбоя или перед удалением).
     #[cfg(unix)]
     CleanupNetwork,
 }

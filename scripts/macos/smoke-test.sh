@@ -34,11 +34,35 @@ wait_for() { # wait_for секунд команда…
 state_is() { cli status | grep -q "\"vpn\": \"$1\""; }
 http_with() { local bin="$1"; shift; [[ "$("$bin" -s -o /dev/null -m 10 -w '%{http_code}' "$@" "$probe")" == "204" ]]; }
 http_ok() { http_with /usr/bin/curl "$@"; }
-kscurl() { http_with /Users/Shared/klick-ks/tool/kscurl "$@"; }
 first_service() { networksetup -listallnetworkservices | sed 1d | grep -v '^\*' | head -1; }
 proxy_on() { scutil --proxy | grep -q "HTTPEnable : 1" && scutil --proxy | grep -q "HTTPPort : 7890"; }
 dns_ours() { scutil --dns | grep -q "nameserver\[0\] : 198.18.0.2"; }
 tun_up() { ifconfig | grep -q "inet 198.18.0.1 "; }
+pf_on() { pfctl -a com.apple/090.klick -s rules 2>/dev/null | grep -q "block return out quick all"; }
+
+# Проверки Kill Switch — от имени человека, а не root: root правило pf пропускает (это ядро kl!ck).
+user="${SUDO_USER:-nobody}"
+[[ "$user" == "root" ]] && user=nobody
+ks="/Users/Shared/klick-ks/tool/kscurl"
+as_user() { sudo -u "$user" "$@"; }
+user_ok() { [[ "$(as_user /usr/bin/curl -s -o /dev/null -m 8 -w '%{http_code}' "$probe")" == "204" ]]; }
+ks_ok() { [[ "$(as_user "$ks" -s -o /dev/null -m 8 -w '%{http_code}' "$probe")" == "204" ]]; }
+# Защищённая программа ни разу не вышла в интернет за столько-то секунд — пока идёт сбой.
+ks_never() {
+    local end=$((SECONDS + $1))
+    while (( SECONDS < end )); do
+        if [[ "$(as_user "$ks" -s -o /dev/null -m 2 -w '%{http_code}' "$probe" 2>/dev/null)" == "204" ]]; then
+            echo "    защищённая программа вышла в интернет на $((SECONDS - end + $1))-й секунде" >&2
+            return 1
+        fi
+        sleep 0.2
+    done
+}
+start_server() {
+    "$work/mihomo-server" -d "$work" -f "$work/server.yaml" > "$work/server.log" 2>&1 &
+    server_pid=$!
+    wait_for 10 nc -z 127.0.0.1 21080
+}
 
 cleanup() {
     echo "== уборка"
@@ -71,9 +95,7 @@ rules: [MATCH,DIRECT]
 YAML
 # Копия ядра: по пути установленного ядра проверка ниже считает ядра службы.
 cp "$core" "$work/mihomo-server"
-"$work/mihomo-server" -d "$work" -f "$work/server.yaml" > "$work/server.log" 2>&1 &
-server_pid=$!
-check "тестовый сервер слушает 21080" wait_for 10 nc -z 127.0.0.1 21080
+check "тестовый сервер слушает 21080" start_server
 
 echo "== подключение и серверы"
 check "добавить ссылку" cli add "socks5://127.0.0.1:21080#CI"
@@ -105,22 +127,49 @@ check "адаптер убран" wait_for 10 bash -c '! ifconfig | grep -q "ine
 check "DNS возвращён" bash -c '! scutil --dns | grep -q "nameserver\[0\] : 198.18.0.2"'
 check "страница напрямую после VPN" http_ok
 
-echo "== Kill Switch"
+echo "== Kill Switch (проверки от имени $user)"
 mkdir -p /Users/Shared/klick-ks/tool
-cp /usr/bin/curl /Users/Shared/klick-ks/tool/kscurl
-check "программа до Kill Switch ходит напрямую" kscurl
+cp /usr/bin/curl "$ks"
+chmod 755 /Users/Shared/klick-ks /Users/Shared/klick-ks/tool "$ks"
+cli mode tun >/dev/null
+check "программа до Kill Switch ходит напрямую" ks_ok
 check "добавить в Kill Switch" cli ks add /Users/Shared/klick-ks/tool
+check "правила pf стоят" wait_for 10 pf_on
 check "страж поднял адаптер при выключенном VPN" wait_for 15 tun_up
-check "защищённая программа без VPN не выходит" bash -c "! /Users/Shared/klick-ks/tool/kscurl -s -o /dev/null -m 8 $probe"
-check "остальные ходят напрямую" http_ok
+check "защищённая программа без VPN не выходит" ks_never 4
+check "остальные ходят напрямую" user_ok
+
+echo "== Kill Switch: сбои при выключенном VPN"
+kill -9 "$(cat /var/run/klick/guard.sock.pid)"
+check "упал страж — защищённая программа не выходит" ks_never 6
+check "страж вернулся" wait_for 30 tun_up
+check "остальные снова ходят" wait_for 30 user_ok
+kill -9 "$(launchctl print system/app.klick.service | awk '/pid =/ {print $3}')"
+check "упала служба — защищённая программа не выходит" ks_never 10
+check "правила pf пережили падение службы" pf_on
+check "служба вернулась" wait_for 30 cli status
+check "страж вернулся после перезапуска службы" wait_for 30 tun_up
+check "остальные снова ходят" wait_for 30 user_ok
+
+echo "== Kill Switch: сбои при включённом VPN (TUN)"
 cli connect >/dev/null
-check "VPN (TUN) подключён" wait_for 20 state_is connected
-check "защищённая программа ходит через VPN" kscurl
+check "VPN подключён" wait_for 20 state_is connected
+check "защищённая программа ходит через VPN" wait_for 20 ks_ok
+kill "$server_pid"; wait "$server_pid" 2>/dev/null
+check "упал сервер VPN — защищённая программа не выходит напрямую" ks_never 6
+check "остальные ходят (положение «только выбранное»)" user_ok
+kill -9 "$(cat /var/run/klick/core.sock.pid)"
+check "упало ядро при мёртвом сервере — защищённая программа не выходит" ks_never 10
+check "сервер снова работает" start_server
+check "защищённая программа снова ходит через VPN" wait_for 60 ks_ok
 cli disconnect >/dev/null
-check "страж вернулся после отключения" wait_for 15 tun_up
+check "после отключения защищённая программа не выходит" ks_never 4
+
+echo "== Kill Switch выключен"
 check "убрать из Kill Switch" cli ks rm /Users/Shared/klick-ks/tool
+check "правила pf сняты" wait_for 10 bash -c '! pfctl -a com.apple/090.klick -s rules 2>/dev/null | grep -q block'
 check "страж остановлен" wait_for 10 bash -c '! ifconfig | grep -q "inet 198.18.0.1 "'
-check "программа снова ходит напрямую" kscurl
+check "программа снова ходит напрямую" wait_for 10 ks_ok
 rm -rf /Users/Shared/klick-ks
 
 echo "== падение службы"
@@ -145,6 +194,8 @@ check "служба убрана из launchd" bash -c '! launchctl print system
 check "файлы службы удалены" test ! -e /Library/PrivilegedHelperTools/klick
 check "прокси не остался" bash -c '! scutil --proxy | grep -q "HTTPPort : 7890"'
 check "DNS не остался" bash -c '! scutil --dns | grep -q "198.18.0.2"'
+check "правил pf не осталось" bash -c '! pfctl -a com.apple/090.klick -s rules 2>/dev/null | grep -q block'
+check "интернет у пользователя есть" user_ok
 
 if [[ $failed -gt 0 ]]; then
     echo "== не прошло проверок: $failed"
