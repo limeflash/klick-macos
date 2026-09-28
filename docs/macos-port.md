@@ -133,7 +133,7 @@ kl!ck — [vbu00](https://github.com/vbu00) (разработка) и [Dmitriy M
   скоростях и конфликт с другим VPN, включённым одновременно.
 
 Запасной выход, если служба не отвечает, а Kill Switch держит интернет закрытым:
-`sudo "/Applications/kl!ck.app/Contents/MacOS/klick-service" cleanup-network` — вернёт прокси и DNS
+`sudo '/Applications/kl!ck.app/Contents/MacOS/klick-service' cleanup-network` — вернёт прокси и DNS
 и снимет правила pf.
 
 Правильное решение на будущее — Network Extension (`NEFilterDataProvider`, системное расширение):
@@ -186,7 +186,7 @@ kl!ck — [vbu00](https://github.com/vbu00) (разработка) и [Dmitriy M
 ```
 scripts/macos/build.sh              # dist/kl!ck.app и dist/klick-0.9.0.pkg (universal)
 scripts/macos/build.sh --native     # только архитектура этого Mac — быстрее
-sudo scripts/macos/smoke-test.sh "dist/kl!ck.app"   # сквозная проверка (меняет настройки сети! только тестовый Mac)
+sudo scripts/macos/smoke-test.sh 'dist/kl!ck.app'   # сквозная проверка (меняет настройки сети! только тестовый Mac)
 scripts/check-configs.sh            # все варианты конфига через mihomo -t
 ```
 
@@ -201,7 +201,7 @@ cd ui && npm run dev                 # превью: http://127.0.0.1:5173/?os=m
 KLICK_DEV=1 cargo run -p klick-ui    # окно со службой для разработки
 ```
 
-Удаление: `sudo "/Applications/kl!ck.app/Contents/Resources/uninstall.sh"` (`--wipe` — вместе с
+Удаление: `sudo '/Applications/kl!ck.app/Contents/Resources/uninstall.sh'` (`--wipe` — вместе с
 подключениями и настройками).
 
 ## Что проверено

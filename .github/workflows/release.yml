@@ -1,0 +1,77 @@
+# Выпуск kl!ck для macOS: по тегу v* собрать пакет на Mac, проверить и выложить в Releases.
+#   git tag v0.9.0 && git push origin v0.9.0
+# В выпуске два файла: klick-<версия>.pkg и klick-macos.pkg — для постоянной ссылки
+# https://github.com/<владелец>/<репозиторий>/releases/latest/download/klick-macos.pkg
+# Пакет не подписан сертификатом Apple (ставится из Терминала: sudo installer -pkg … -target /).
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Версия тега совпадает с версией в Cargo.toml
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          [ "$tag" = "$ver" ] || { echo "тег $GITHUB_REF_NAME, а в Cargo.toml $ver"; exit 1; }
+
+      - name: Сборка kl!ck.app и .pkg (universal)
+        env:
+          # «Проверить обновления» в окне смотрит выпуски этого репозитория.
+          KLICK_RELEASES_REPO: ${{ github.repository }}
+        run: scripts/macos/build.sh
+
+      - name: Тесты
+        run: cargo test --workspace
+
+      - name: Конфиги ядра (mihomo -t)
+        run: scripts/check-configs.sh
+
+      - name: Сквозная проверка на этом Mac
+        run: sudo scripts/macos/smoke-test.sh 'dist/kl!ck.app'
+
+      - name: Выпуск
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          cp "dist/klick-$ver.pkg" dist/klick-macos.pkg
+          cat > notes.md <<NOTES
+          kl!ck $ver для macOS 12+ (Apple Silicon и Intel).
+
+          Установка из Терминала (пакет не подписан сертификатом Apple, поэтому так проще, чем двойным щелчком):
+
+          \`\`\`sh
+          curl -fL -o /tmp/klick.pkg https://github.com/${{ github.repository }}/releases/download/$GITHUB_REF_NAME/klick-macos.pkg
+          sudo installer -pkg /tmp/klick.pkg -target /
+          open -a 'kl!ck'
+          \`\`\`
+
+          Удаление: \`sudo '/Applications/kl!ck.app/Contents/Resources/uninstall.sh'\`
+          NOTES
+          gh release create "$GITHUB_REF_NAME" "dist/klick-$ver.pkg" dist/klick-macos.pkg \
+            --title "kl!ck $ver для macOS" --notes-file notes.md

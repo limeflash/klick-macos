@@ -1,7 +1,8 @@
 #!/bin/bash
 # Удаляет kl!ck: службу (вернув прокси и DNS), окно, автозапуск.
-#   sudo "/Applications/kl!ck.app/Contents/Resources/uninstall.sh"          # подключения и настройки остаются
-#   sudo "/Applications/kl!ck.app/Contents/Resources/uninstall.sh" --wipe   # всё, вместе с данными
+#   sudo '/Applications/kl!ck.app/Contents/Resources/uninstall.sh'          # подключения и настройки остаются
+#   sudo '/Applications/kl!ck.app/Contents/Resources/uninstall.sh' --wipe   # всё, вместе с данными
+# (одинарные кавычки: в zsh `!` внутри двойных — подстановка из истории команд)
 set -u
 [[ $EUID -eq 0 ]] || exec sudo "$0" "$@"
 wipe=""

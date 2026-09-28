@@ -4,7 +4,7 @@
 # Kill Switch, падение службы, удаление. Меняет настройки сети Mac и в конце возвращает их —
 # запускать на тестовой машине или в CI (GitHub Actions, macOS), а не на рабочем компьютере.
 #
-#   sudo scripts/macos/smoke-test.sh "dist/kl!ck.app"
+#   sudo scripts/macos/smoke-test.sh 'dist/kl!ck.app'
 set -uo pipefail
 
 [[ $EUID -eq 0 ]] || { echo "нужен root: sudo $0 $*" >&2; exit 2; }

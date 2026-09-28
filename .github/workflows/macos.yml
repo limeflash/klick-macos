@@ -7,9 +7,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Новый пуш ждёт, пока доработает текущая сборка, а не отменяет её (ждёт только самый свежий).
 concurrency:
   group: macos-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:

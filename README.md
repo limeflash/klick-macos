@@ -14,20 +14,51 @@ Windows-версии вливаются сюда обычным `git merge`. П�
 что чем заменено, нюансы платформы (TUN и DNS, системный прокси, Kill Switch без WFP, подпись),
 что проверено, чек-лист ручной проверки и план для iOS.
 
+### Установка из командной строки
+
+Пакет пока не подписан сертификатом Apple, поэтому двойной щелчок по `.pkg` на macOS 15 упирается
+в Gatekeeper («Системные настройки → Конфиденциальность и безопасность → Всё равно открыть»).
+Из Терминала проще — `installer` ставит пакет без этого вопроса:
+
+```sh
+curl -fL -o /tmp/klick.pkg https://github.com/limeflash/klick-macos/releases/latest/download/klick-macos.pkg
+sudo installer -pkg /tmp/klick.pkg -target /
+open -a 'kl!ck'
+```
+
+Пакет ставит окно в «Программы» и службу (демон launchd `app.klick.service`, файлы в
+`/Library/PrivilegedHelperTools/klick`, данные в `/Library/Application Support/klick`).
+Обновление — те же команды: служба перезапустится и, если VPN был включён, включит его снова.
+
+Пути с `kl!ck` пишите в **одинарных** кавычках: в zsh знак `!` внутри двойных кавычек — подстановка
+из истории команд («event not found»).
+
+```sh
+sudo launchctl print system/app.klick.service | grep state            # служба работает: state = running
+'/Applications/kl!ck.app/Contents/MacOS/klick-cli' --prod status      # состояние VPN
+sudo '/Applications/kl!ck.app/Contents/Resources/uninstall.sh'        # удалить (подключения и настройки остаются)
+sudo '/Applications/kl!ck.app/Contents/Resources/uninstall.sh' --wipe # удалить всё
+sudo '/Applications/kl!ck.app/Contents/MacOS/klick-service' cleanup-network  # вернуть прокси, DNS и снять Kill Switch, если служба не отвечает
+```
+
+### Сборка
+
 На Mac (нужны Xcode Command Line Tools, Rust, Node.js 20.19+):
 
-```
+```sh
 scripts/macos/build.sh             # dist/kl!ck.app и dist/klick-0.9.0.pkg (universal)
 scripts/macos/build.sh --native    # только архитектура этого Mac — быстрее
+sudo installer -pkg dist/klick-0.9.0.pkg -target /
 ```
 
-`.pkg` ставит окно в «Программы» и службу (демон launchd `app.klick.service`, файлы в
-`/Library/PrivilegedHelperTools/klick`, данные в `/Library/Application Support/klick`).
-Удаление: `sudo "/Applications/kl!ck.app/Contents/Resources/uninstall.sh" [--wipe]`.
+Выпуск: `git tag v0.9.0 && git push origin v0.9.0` — workflow `.github/workflows/release.yml` соберёт
+пакет на Mac и выложит его в Releases (`klick-macos.pkg` — для ссылки выше, и `klick-0.9.0.pkg`).
+
+### Разработка
 
 Служба для разработки на Mac — как на Windows, только канал — `/tmp/klick-dev.sock`:
 
-```
+```sh
 scripts/macos/fetch-core.sh                                        # ядро mihomo для macOS в resources/core/mihomo
 cargo build -p klick-service -p klick-cli
 sudo target/debug/klick-service console --allow-tun --allow-ks     # без sudo — только порт, без TUN и системного прокси
@@ -37,7 +68,7 @@ KLICK_DEV=1 cargo run -p klick-ui
 
 Превью интерфейса в браузере как на Mac: `http://127.0.0.1:5173/?os=mac&s=connected`.
 Проверки: `cargo test`, `scripts/check-configs.sh` (все конфиги через `mihomo -t`),
-`sudo scripts/macos/smoke-test.sh "dist/kl!ck.app"` (сквозная, меняет настройки сети — только на тестовом Mac)
+`sudo scripts/macos/smoke-test.sh 'dist/kl!ck.app'` (сквозная, меняет настройки сети — только на тестовом Mac)
 и workflow `.github/workflows/macos.yml` на раннере GitHub с macOS.
 
 Дальше — исходное описание Windows-версии.

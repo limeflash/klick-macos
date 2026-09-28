@@ -3,6 +3,9 @@
 # Если VPN был включён до обновления, служба включит его снова.
 set -e
 APP="/Applications/kl!ck.app"
+# Пакет не подписан сертификатом Apple: если macOS перенесла на программу метку карантина
+# со скачанного пакета, первый запуск упрётся в Gatekeeper. Установку уже разрешил администратор.
+/usr/bin/xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 "$APP/Contents/MacOS/klick-service" install
 
 # Открыть окно у того, кто сейчас за Mac (установка идёт от root).
