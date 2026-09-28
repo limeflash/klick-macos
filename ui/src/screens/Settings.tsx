@@ -25,7 +25,7 @@ const REPO = 'https://github.com/vbu00/klick';
 const AUTHORS: [string, string, string][] = [
   ['vbu00', 'Разработка', 'https://github.com/vbu00'],
   ['Dmitriy Medvedev', 'Дизайн интерфейса и логотип', 'https://github.com/aleuuu'],
-  ...(isMac ? [['ennanoff', 'Порт на macOS', 'https://github.com/ennanoff'] as [string, string, string]] : []),
+  ...(isMac ? [['limeflash', 'Порт на macOS', 'https://github.com/limeflash'] as [string, string, string]] : []),
 ];
 
 /** Скопировать в буфер обмена и сказать об этом. */

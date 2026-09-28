@@ -4,7 +4,7 @@
 
 * [vbu00](https://github.com/vbu00) — разработка
 * [Dmitriy Medvedev](https://github.com/aleuuu) — дизайн интерфейса и логотип
-* [ennanoff](https://github.com/ennanoff) — порт на macOS
+* [limeflash](https://github.com/limeflash) — порт на macOS
 
 ## macOS
 
