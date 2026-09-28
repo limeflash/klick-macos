@@ -29,6 +29,9 @@ aes-gcm = "0.10"
 getrandom = "0.3"
 plist = "1"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
 

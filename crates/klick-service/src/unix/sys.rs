@@ -64,8 +64,8 @@ fn parse_scutil_dns(text: &str) -> Vec<String> {
     out
 }
 
-/// Выполнить системную программу, но не дольше `limit`: зависшая (networksetup ждёт блокировку
-/// настроек сети, lsof — сетевой диск) убивается, и служба не встаёт вместе с ней.
+/// Выполнить системную программу, но не дольше `limit`: зависшая (lsof на недоступном сетевом
+/// диске, pfctl) убивается, и служба не встаёт вместе с ней.
 /// Вывод читается сразу, чтобы большой вывод не упёрся в буфер канала.
 pub fn run_within(program: &str, args: &[&str], input: Option<&str>, limit: std::time::Duration) -> std::io::Result<std::process::Output> {
     use std::io::{Read, Write};

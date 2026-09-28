@@ -41,6 +41,46 @@ tun_up() { ifconfig | grep -q "inet 198.18.0.1 "; }
 pf_on() { pfctl -a com.apple/090.klick -s rules 2>/dev/null | grep -q "block return out quick all"; }
 pf_enabled() { pfctl -s info 2>/dev/null | grep -q "Status: Enabled"; }
 ks_has() { cli ks status | grep -q "\"folder\": \"$1\""; }
+enabled_services() { networksetup -listallnetworkservices | sed 1d | grep -v '^\*'; }
+# Настройки всех сетевых служб, как их видит networksetup: kl!ck пишет их через SystemConfiguration,
+# networksetup читает независимо — сверяем с тем, что было до подключения.
+netconf_snapshot() {
+    networksetup -listallnetworkservices | sed 1d | sed 's/^\*//' | while IFS= read -r s; do
+        echo "[$s]"
+        for f in -getwebproxy -getsecurewebproxy -getsocksfirewallproxy -getproxybypassdomains -getautoproxyurl -getproxyautodiscovery -getdnsservers; do
+            networksetup "$f" "$s"
+        done
+    done
+}
+netconf_same() {
+    netconf_snapshot > "$work/netconf.now"
+    diff "$work/netconf.before" "$work/netconf.now" >&2
+}
+# Прокси kl!ck у каждой включённой службы, а не только у основной.
+all_proxied() {
+    local s
+    while IFS= read -r s; do
+        for f in -getwebproxy -getsecurewebproxy -getsocksfirewallproxy; do
+            networksetup "$f" "$s" | tr '\n' ' ' | grep -q "Enabled: Yes Server: 127.0.0.1 Port: 7890" || return 1
+        done
+        networksetup -getproxybypassdomains "$s" | grep -qx "192.168.0.0/16" || return 1
+    done < <(enabled_services)
+}
+all_dns_ours() {
+    local s
+    while IFS= read -r s; do
+        [[ "$(networksetup -getdnsservers "$s")" == "198.18.0.2" ]] || return 1
+    done < <(enabled_services)
+}
+# Сколько секунд заняла команда (с долями).
+seconds() { local TIMEFORMAT=%R; { time "$@" >/dev/null 2>&1; } 2>&1; }
+quick() { awk -v t="$1" -v max="$2" 'BEGIN { exit !(t <= max) }'; }
+disconnect_quickly() { # disconnect_quickly "режим"
+    local took
+    took="$(seconds cli disconnect)"
+    echo "    «Отключить» ($1): $took с; $(grep 'отключено за' "$log" | tail -1 | sed 's/.*отключено/отключено/')"
+    check "«Отключить» ($1) быстрее 2 с" quick "$took" 2
+}
 
 # Проверки Kill Switch — от имени человека, а не root: root правило pf пропускает (это ядро kl!ck).
 user="${SUDO_USER:-nobody}"
@@ -73,12 +113,27 @@ cleanup() {
     echo "== уборка"
     [[ -n "${server_pid:-}" ]] && kill "$server_pid" 2>/dev/null
     [[ -x "$svc" ]] && "$svc" uninstall --wipe >/dev/null 2>&1
+    if [[ -n "${user_service:-}" ]]; then
+        networksetup -setdnsservers "$user_service" ${user_dns:-Empty}
+        networksetup -setwebproxystate "$user_service" off
+        networksetup -setproxybypassdomains "$user_service" Empty
+    fi
     rm -rf "$work" /Users/Shared/klick-ks /Users/Shared/klick-ks-link
 }
 trap cleanup EXIT
 
 echo "== $(sw_vers -productName) $(sw_vers -productVersion) $(uname -m)"
-echo "   сетевая служба: $(first_service); DNS: $(networksetup -getdnsservers "$(first_service)" | tr '\n' ' ')"
+echo "   сетевые службы: $(enabled_services | tr '\n' ';'); DNS: $(networksetup -getdnsservers "$(first_service)" | tr '\n' ' ')"
+# Свои настройки у человека: DNS вручную, выключенный прокси, исключения. kl!ck должен вернуть их
+# как было. DNS — тот же, что раздал роутер, чтобы интернет у раннера работал как прежде.
+user_service="$(first_service)"
+user_dns="$(networksetup -getdnsservers "$user_service" | grep -E '^[0-9a-f.:]+$' | tr '\n' ' ')"
+router_dns="$(scutil --dns | awk '/nameserver\[0\]/ {print $3; exit}')"
+networksetup -setdnsservers "$user_service" "${router_dns:-8.8.8.8}" 8.8.8.8
+networksetup -setwebproxy "$user_service" 10.255.255.1 3128
+networksetup -setwebproxystate "$user_service" off
+networksetup -setproxybypassdomains "$user_service" "*.klick.test" 10.255.0.0/16
+netconf_snapshot > "$work/netconf.before"
 # Физический интерфейс — до того, как kl!ck поднимет TUN.
 iface="$(route -n get default 2>/dev/null | awk '/interface:/ {print $2}')"
 
@@ -134,11 +189,13 @@ cli mode proxy >/dev/null
 cli connect >/dev/null
 check "подключено" wait_for 20 state_is connected
 check "системный прокси 127.0.0.1:7890" proxy_on
+check "прокси у всех включённых сетевых служб" all_proxied
 check "страница через порт 7890" http_ok -x http://127.0.0.1:7890
 cli ip | head -8
-cli disconnect >/dev/null
+disconnect_quickly "Системный прокси"
 check "выключено" state_is off
-check "прокси снят" bash -c '! scutil --proxy | grep -q "HTTPPort : 7890"'
+check "прокси снят" wait_for 5 bash -c '! scutil --proxy | grep -q "HTTPPort : 7890"'
+check "настройки сети как до подключения" netconf_same
 
 echo "== режим VPN (TUN)"
 cli mode tun >/dev/null
@@ -146,6 +203,7 @@ cli connect >/dev/null
 check "подключено" wait_for 20 state_is connected
 check "адаптер utun с 198.18.0.1" tun_up
 check "DNS подменён на 198.18.0.2" dns_ours
+check "DNS подменён у всех включённых сетевых служб" all_dns_ours
 check "имя отвечает подменным адресом" bash -c 'dscacheutil -q host -a name www.gstatic.com | grep -q "ip_address: 198.18."'
 check "страница через TUN" http_ok
 cli ip | grep -E '"dns_protected"|"ipv4"' | head -3
@@ -156,8 +214,14 @@ check "смена режима на ходу: системный прокси с
 check "смена режима на ходу: адаптер убран" wait_for 10 bash -c '! ifconfig | grep -q "inet 198.18.0.1 "'
 check "смена режима на ходу: DNS возвращён" bash -c '! scutil --dns | grep -q "nameserver\[0\] : 198.18.0.2"'
 cli disconnect >/dev/null
+check "настройки сети как до подключения" netconf_same
+cli mode tun >/dev/null
+cli connect >/dev/null
+check "VPN (TUN) снова подключён" wait_for 20 state_is connected
+disconnect_quickly "VPN (TUN)"
 check "адаптер убран" wait_for 10 bash -c '! ifconfig | grep -q "inet 198.18.0.1 "'
-check "DNS возвращён" bash -c '! scutil --dns | grep -q "nameserver\[0\] : 198.18.0.2"'
+check "DNS возвращён" wait_for 5 bash -c '! scutil --dns | grep -q "nameserver\[0\] : 198.18.0.2"'
+check "настройки сети как до подключения" netconf_same
 check "страница напрямую после VPN" http_ok
 
 echo "== Kill Switch (проверки от имени $user)"
@@ -261,6 +325,7 @@ check "прокси не остался" bash -c '! scutil --proxy | grep -q "HT
 check "DNS не остался" bash -c '! scutil --dns | grep -q "198.18.0.2"'
 check "правил pf не осталось" bash -c '! pfctl -a com.apple/090.klick -s rules 2>/dev/null | grep -q block'
 check "интернет у пользователя есть" user_ok
+check "настройки сети как до установки" netconf_same
 
 if [[ $failed -gt 0 ]]; then
     echo "== не прошло проверок: $failed"

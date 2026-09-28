@@ -3,13 +3,13 @@
 # ставим новый пакет поверх — служба обновилась, подключения и настройки на месте, VPN вернулся сам.
 # Меняет настройки сети Mac — запускать на тестовой машине или в CI.
 #
-#   sudo scripts/macos/upgrade-test.sh dist/klick-0.9.1.pkg [v0.9.0]
+#   sudo scripts/macos/upgrade-test.sh dist/klick-0.9.2.pkg [v0.9.1]
 set -uo pipefail
 
 [[ $EUID -eq 0 ]] || { echo "нужен root: sudo $0 $*" >&2; exit 2; }
 new_pkg="${1:?путь к новому .pkg}"
 [[ -f "$new_pkg" ]] || { echo "нет $new_pkg" >&2; exit 2; }
-old_tag="${2:-v0.9.0}"
+old_tag="${2:-v0.9.1}"
 repo="${GITHUB_REPOSITORY:-limeflash/klick-macos}"
 app="/Applications/kl!ck.app"
 svc="/Library/PrivilegedHelperTools/klick/klick-service"
@@ -93,7 +93,7 @@ check "системный прокси на месте" bash -c 'scutil --proxy 
 check "ядро от старой версии не осталось" test "$(pgrep -f '/Library/PrivilegedHelperTools/klick/mihomo' | wc -l | tr -d ' ')" = "1"
 cli disconnect >/dev/null
 check "выключено" wait_for 10 state_is off
-check "прокси снят" bash -c '! scutil --proxy | grep -q "HTTPPort : 7890"'
+check "прокси снят" wait_for 5 bash -c '! scutil --proxy | grep -q "HTTPPort : 7890"'
 
 if [[ $failed -gt 0 ]]; then
     echo "--- журнал службы"

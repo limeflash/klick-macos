@@ -33,6 +33,14 @@ wait_for() { # wait_for секунд команда…
 }
 state_is() { cli status | grep -q "\"vpn\": \"$1\""; }
 json() { /usr/bin/python3 -c "import json,sys; d=json.load(sys.stdin); $1"; }
+seconds() { local TIMEFORMAT=%R; { time "$@" >/dev/null 2>&1; } 2>&1; }
+# «Отключить» — сразу, а не через 8–10 с: время команды и шаги из журнала службы.
+disconnect_timed() { # disconnect_timed "режим"
+    local took
+    took="$(seconds cli disconnect)"
+    echo "    «Отключить» ($1): $took с; $(grep 'отключено за' "$log" | tail -1 | sed 's/.*отключено/отключено/')"
+    check "«Отключить» ($1) быстрее 2 с" awk -v t="$took" 'BEGIN { exit !(t <= 2) }'
+}
 
 # Всё, что «как у человека», — от имени пользователя: root правило pf Kill Switch пропускает.
 user="${SUDO_USER:-nobody}"
@@ -163,7 +171,7 @@ vpn="$(ip_via /usr/bin/curl -x http://127.0.0.1:7890)" && ! is_direct "$vpn" \
     && pass "через прокси адрес выхода — сервера, не Mac" || fail "через прокси адрес выхода — сервера, не Mac"
 where via_vpn
 speed -x http://127.0.0.1:7890
-cli disconnect >/dev/null
+disconnect_timed "Системный прокси"
 check "выключено" wait_for 10 state_is off
 
 echo "== режим VPN (TUN), всё через VPN"
@@ -187,7 +195,7 @@ if [[ ${#fast[@]} -gt 1 ]]; then
     where via_vpn
     cli server "${fast[0]}" >/dev/null
 fi
-cli disconnect >/dev/null
+disconnect_timed "VPN (TUN)"
 check "адаптер убран" wait_for 10 bash -c '! ifconfig | grep -q "inet 198.18.0.1 "'
 now="$(ip_via /usr/bin/curl)" && is_direct "$now" && pass "после отключения адрес снова свой" || fail "после отключения адрес снова свой"
 
@@ -223,7 +231,7 @@ check "ядро вернулось, защищённая программа сн
 kill -9 "$(launchctl print system/app.klick.service | awk '/pid =/ {print $3}')"
 check "упала служба — защищённая программа не вышла напрямую" ks_never_direct 10
 check "служба вернулась, защищённая программа снова через VPN" wait_for 60 ks_via_vpn
-cli disconnect >/dev/null
+disconnect_timed "Kill Switch включён"
 check "VPN выключен — защищённая программа не вышла напрямую" ks_never_direct 5
 check "убрать из Kill Switch" cli ks rm /Users/Shared/klick-ks/tool
 check "программа снова ходит напрямую" wait_for 15 ks_direct_ok

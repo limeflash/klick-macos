@@ -999,14 +999,26 @@ impl Engine {
     }
 
     async fn disconnect(&mut self) {
+        let t0 = Instant::now();
         self.clear_proxy().await;
+        let t1 = Instant::now();
         self.stop_core().await;
+        let t2 = Instant::now();
         self.guard = None;
         self.since = None;
         self.restarts = 0;
-        self.apply_killswitch().await;
+        // VPN выключен, как только ядро остановлено и настройки сети возвращены. Страж Kill Switch
+        // запускается следом: пока он поднимается, программы из Kill Switch держат правила pf.
         self.set_state(VpnState::Off, None);
         self.save_runtime(false);
+        self.apply_killswitch().await;
+        tracing::info!(
+            "отключено за {} мс: прокси {} мс, ядро и DNS {} мс, Kill Switch {} мс",
+            t0.elapsed().as_millis(),
+            (t1 - t0).as_millis(),
+            (t2 - t1).as_millis(),
+            t2.elapsed().as_millis()
+        );
     }
 
     /// Новый режим или другое подключение: ядро перезапускается с новым конфигом.
@@ -1476,7 +1488,7 @@ impl Engine {
         .unwrap_or(false);
         match (on, ok) {
             (true, true) => tracing::info!("системный прокси поставлен"),
-            (true, false) => tracing::warn!("системный прокси не поставился: нет сетевых служб"),
+            (true, false) => tracing::warn!("системный прокси не поставился: нет включённых сетевых служб или настройки не записались"),
             (false, true) => tracing::info!("системный прокси снят"),
             (false, false) => {}
         }
@@ -1496,7 +1508,7 @@ impl Engine {
             .unwrap_or(false);
         match (on, ok) {
             (true, true) => tracing::info!("DNS на время VPN: {}", netconf::DNS_ADDR),
-            (true, false) => tracing::warn!("DNS не подменился: нет сетевых служб"),
+            (true, false) => tracing::warn!("DNS не подменился: нет включённых сетевых служб или настройки не записались"),
             (false, true) => tracing::info!("DNS возвращён"),
             (false, false) => {}
         }
@@ -1515,7 +1527,7 @@ impl Engine {
             let marker = self.paths.data.join(netconf::DNS_MARKER);
             let _ = tokio::task::spawn_blocking(move || netconf::dns_apply(&marker)).await;
         }
-        // Прошлый раз вернуть настройки не удалось (networksetup не ответил) — пробуем снова при смене сети.
+        // Прошлый раз вернуть настройки не удалось (настройки сети были заняты) — пробуем снова при смене сети.
         let proxy_left = self.paths.data.join(netconf::PROXY_MARKER);
         if !self.proxy_applied && netconf::has_leftover(&proxy_left) {
             let _ = tokio::task::spawn_blocking(move || netconf::proxy_clear(&proxy_left)).await;
