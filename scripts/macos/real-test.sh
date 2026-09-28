@@ -109,8 +109,18 @@ where() { # where ipcheck-колонка
     cli ip | json "c = d.get('$1') or {}; print('    ' + ', '.join(str(x) for x in (c.get('country'), c.get('city'), c.get('provider')) if x) + ('  (ошибка: %s)' % c['error'] if c.get('error') else ''))"
 }
 
+# Отдельный якорь pf для проверки «зашифрованный DNS недоступен»; токен — своя ссылка на pf.
+TEST_ANCHOR="com.apple/250.klick-test"
+pf_token=""
+unblock_doh() {
+    pfctl -q -a "$TEST_ANCHOR" -F all 2>/dev/null
+    [[ -n "$pf_token" ]] && pfctl -q -X "$pf_token" 2>/dev/null
+    pf_token=""
+}
+
 cleanup() {
     echo "== уборка"
+    unblock_doh
     [[ -x "$svc" ]] && "$svc" uninstall --wipe >/dev/null 2>&1
     rm -rf /Users/Shared/klick-ks "$tmp"
 }
@@ -180,6 +190,21 @@ fi
 cli disconnect >/dev/null
 check "адаптер убран" wait_for 10 bash -c '! ifconfig | grep -q "inet 198.18.0.1 "'
 now="$(ip_via /usr/bin/curl)" && is_direct "$now" && pass "после отключения адрес снова свой" || fail "после отключения адрес снова свой"
+
+echo "== зашифрованный DNS недоступен (как у тестера в Турции)"
+# Сеть, где DoH Яндекса и Cloudflare не работает: адреса серверов kl!ck должен найти через DNS системы.
+pfctl -s rules 2>/dev/null | grep -q 'anchor "com.apple/\*"' || pfctl -q -f /etc/pf.conf
+pf_token="$(pfctl -E 2>&1 | awk '/Token/ {print $3}')"
+printf 'block drop out quick proto { tcp udp } from any to { 1.1.1.1 77.88.8.8 } port { 443 853 }\n' | pfctl -q -a "$TEST_ANCHOR" -f -
+check "DoH Cloudflare и Яндекса действительно недоступен" bash -c '! /usr/bin/curl -s -m 4 -o /dev/null https://1.1.1.1/dns-query && ! /usr/bin/curl -s -m 4 -o /dev/null https://77.88.8.8/dns-query'
+cli routing all >/dev/null
+cli mode tun >/dev/null
+cli connect >/dev/null
+check "подключено без зашифрованного DNS" wait_for 30 state_is connected
+vpn="$(ip_via /usr/bin/curl)" && ! is_direct "$vpn" && pass "адрес выхода — сервера" || fail "адрес выхода — сервера"
+cli disconnect >/dev/null
+check "адаптер убран" wait_for 10 bash -c '! ifconfig | grep -q "inet 198.18.0.1 "'
+unblock_doh
 
 echo "== Kill Switch с настоящим сервером (положение «только выбранное»)"
 mkdir -p /Users/Shared/klick-ks/tool

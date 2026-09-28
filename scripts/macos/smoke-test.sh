@@ -149,6 +149,12 @@ check "DNS подменён на 198.18.0.2" dns_ours
 check "имя отвечает подменным адресом" bash -c 'dscacheutil -q host -a name www.gstatic.com | grep -q "ip_address: 198.18."'
 check "страница через TUN" http_ok
 cli ip | grep -E '"dns_protected"|"ipv4"' | head -3
+# Смена режима на ходу: VPN переподключается в «Системный прокси», адаптер и подмена DNS уходят.
+cli mode proxy >/dev/null
+check "смена режима на ходу: подключено" wait_for 20 state_is connected
+check "смена режима на ходу: системный прокси стоит" wait_for 10 proxy_on
+check "смена режима на ходу: адаптер убран" wait_for 10 bash -c '! ifconfig | grep -q "inet 198.18.0.1 "'
+check "смена режима на ходу: DNS возвращён" bash -c '! scutil --dns | grep -q "nameserver\[0\] : 198.18.0.2"'
 cli disconnect >/dev/null
 check "адаптер убран" wait_for 10 bash -c '! ifconfig | grep -q "inet 198.18.0.1 "'
 check "DNS возвращён" bash -c '! scutil --dns | grep -q "nameserver\[0\] : 198.18.0.2"'
@@ -226,6 +232,19 @@ check "launchd перезапустил службу, VPN вернулся" wait
 check "ядро от упавшей службы не осталось" test "$(pgrep -f '/Library/PrivilegedHelperTools/klick/mihomo' | wc -l | tr -d ' ')" = "1"
 check "прокси на месте" proxy_on
 cli disconnect >/dev/null
+
+echo "== сервер пропал: окно не ждёт службу"
+cli connect >/dev/null
+check "подключено" wait_for 20 state_is connected
+kill "$server_pid" 2>/dev/null
+server_lost() { cli status | grep -Eq '"vpn": "(reconnecting|server_down)"'; }
+check "служба заметила, что сервер не отвечает" wait_for 60 server_lost
+started=$(date +%s)
+cli disconnect >/dev/null
+took=$(( $(date +%s) - started ))
+echo "    «Отключить» во время переподключения: $took с"
+check "«Отключить» срабатывает сразу, даже во время переподключения" test "$took" -le 3
+check "выключено" state_is off
 
 if [[ $failed -gt 0 ]]; then
     echo "--- журнал службы"
