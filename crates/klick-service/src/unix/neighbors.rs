@@ -8,7 +8,7 @@ use std::path::Path;
 pub use klick_proto::NeighborView as Neighbor;
 
 /// Имя процесса (без учёта регистра) → вид и название.
-const KNOWN: [(&str, &str, &str); 27] = [
+const KNOWN: [(&str, &str, &str); 44] = [
     ("tpws", "dpi_bypass", "zapret"),
     ("nfqws", "dpi_bypass", "zapret"),
     ("spoofdpi", "dpi_bypass", "SpoofDPI"),
@@ -23,6 +23,25 @@ const KNOWN: [(&str, &str, &str); 27] = [
     ("amneziavpn", "vpn", "AmneziaVPN"),
     ("amneziawg", "vpn", "AmneziaWG"),
     ("outline", "vpn", "Outline"),
+    // Служба WARP работает и тогда, когда сам WARP выключен в строке меню: трафик она не трогает,
+    // но включённый WARP перехватывает всё, в том числе соединения ядра kl!ck с сервером.
+    ("cloudflarewarp", "vpn", "Cloudflare WARP"),
+    ("cloudflare warp", "vpn", "Cloudflare WARP"),
+    ("mullvad-daemon", "vpn", "Mullvad"),
+    ("mullvad vpn", "vpn", "Mullvad"),
+    ("protonvpn", "vpn", "Proton VPN"),
+    ("proton vpn", "vpn", "Proton VPN"),
+    ("nordvpn", "vpn", "NordVPN"),
+    ("expressvpn", "vpn", "ExpressVPN"),
+    ("windscribe", "vpn", "Windscribe"),
+    ("tailscaled", "vpn", "Tailscale"),
+    ("tailscale", "vpn", "Tailscale"),
+    ("adguard vpn", "vpn", "AdGuard VPN"),
+    ("v2raytun", "proxy_core", "v2RayTun"),
+    ("streisand", "proxy_core", "Streisand"),
+    ("foxray", "proxy_core", "FoXray"),
+    ("shadowrocket", "proxy_core", "Shadowrocket"),
+    ("karing", "proxy_core", "Karing"),
     ("sing-box", "proxy_core", "sing-box"),
     ("xray", "proxy_core", "Xray"),
     ("v2ray", "proxy_core", "V2Ray"),

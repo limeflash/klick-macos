@@ -48,6 +48,8 @@ pub enum Msg {
     /// Windows сообщила об изменении сети (после сна, смены Wi-Fi, отключения кабеля).
     NetworkChanged,
     CoreExited { generation: u64, code: Option<i32> },
+    /// Итог проверки сервера, которую страж связи запустил в фоне.
+    Probed { generation: u64, retry: bool, ok: bool },
     /// macOS: ядро-страж Kill Switch завершилось само.
     #[cfg(unix)]
     KsCoreExited { generation: u64 },
@@ -135,6 +137,8 @@ pub struct Engine {
     guard: Option<Guard>,
     epoch: Instant,
     restarts: u8,
+    /// Проверка сервера идёт в фоне (поколение ядра): страж ждёт её итога, а не запускает новую.
+    probing: Option<u64>,
     proxy_applied: bool,
     /// Прокси поставила служба, потому что окна не было: что стояло у пользователя до этого.
     #[cfg(windows)]
@@ -304,6 +308,7 @@ pub fn spawn(paths: Paths, profile: Profile) -> anyhow::Result<(EngineHandle, to
         guard: None,
         epoch: Instant::now(),
         restarts: 0,
+        probing: None,
         proxy_applied: false,
         #[cfg(windows)]
         user_proxy_saved: None,
@@ -441,7 +446,8 @@ impl Engine {
             let sleep_to = deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(3600));
             let maintenance_at = self.next_maintenance;
             tokio::select! {
-                _ = tokio::time::sleep_until(maintenance_at) => self.maintenance().await,
+                // Команды окна — первыми: обслуживание и страж подождут, «Отключить» — нет.
+                biased;
                 msg = rx.recv() => {
                     let Some(msg) = msg else { break };
                     match msg {
@@ -454,6 +460,14 @@ impl Engine {
                         }
                         Msg::NetworkChanged => self.on_network_change().await,
                         Msg::CoreExited { generation, code } => self.on_core_exit(generation, code).await,
+                        Msg::Probed { generation, retry, ok } => {
+                            if self.probing == Some(generation) {
+                                self.probing = None;
+                            }
+                            if self.guard.is_some() && self.running.as_ref().map(|r| r.generation) == Some(generation) {
+                                self.probed(retry, ok).await;
+                            }
+                        }
                         #[cfg(unix)]
                         Msg::KsCoreExited { generation } => self.on_ks_core_exit(generation).await,
                         #[cfg(unix)]
@@ -470,6 +484,7 @@ impl Engine {
                         }
                     }
                 }
+                _ = tokio::time::sleep_until(maintenance_at) => self.maintenance().await,
                 _ = tokio::time::sleep_until(sleep_to), if deadline.is_some() => self.on_guard().await,
             }
         }
@@ -907,7 +922,10 @@ impl Engine {
 
     fn guard_deadline(&self) -> Option<Instant> {
         let g = self.guard.as_ref()?;
-        self.running.as_ref()?;
+        let running = self.running.as_ref()?;
+        if self.probing == Some(running.generation) {
+            return None;
+        }
         Some(self.epoch + Duration::from_millis(g.next().0))
     }
 
@@ -1212,31 +1230,23 @@ impl Engine {
     async fn on_guard(&mut self) {
         let Some((_, action)) = self.guard.as_ref().map(Guard::next) else { return };
         match action {
-            Action::Probe => {
-                let mut ok = self.probe().await;
-                if !ok && self.settings.on_server_down != ServerDownPolicy::Reconnect && self.guard.as_ref().map(Guard::health) == Some(Health::Healthy) {
-                    ok = self.switch_to_alternative().await;
-                }
-                if ok && self.running.as_ref().is_some_and(|r| r.started.elapsed() > Duration::from_secs(60)) {
-                    self.restarts = 0;
-                }
-                let now = self.now_ms();
-                let notice = self.guard.as_mut().and_then(|g| g.report(ok, now));
-                self.after_guard(notice);
-            }
+            Action::Probe => self.spawn_probe(false),
             Action::Retry { attempt, .. } => {
                 self.set_state(VpnState::Reconnecting, None);
-                let ok = match attempt {
-                    1 => self.probe().await,
+                match attempt {
+                    1 => self.spawn_probe(true),
                     2 => {
                         self.reload_rules().await;
-                        self.probe().await
+                        self.spawn_probe(true);
                     }
-                    _ => self.restart_core().await && self.probe().await,
-                };
-                let now = self.now_ms();
-                let notice = self.guard.as_mut().and_then(|g| g.report(ok, now));
-                self.after_guard(notice);
+                    _ => {
+                        if self.restart_core().await {
+                            self.spawn_probe(true);
+                        } else {
+                            self.probed(true, false).await;
+                        }
+                    }
+                }
             }
             Action::GiveUp => {
                 let now = self.now_ms();
@@ -1244,6 +1254,32 @@ impl Engine {
                 self.after_guard(notice);
             }
         }
+    }
+
+    /// Проверка сервера — в фоне: пока ядро отвечает (до нескольких секунд), служба выполняет команды окна.
+    fn spawn_probe(&mut self, retry: bool) {
+        let Some((api, generation)) = self.api().zip(self.running.as_ref().map(|r| r.generation)) else { return };
+        self.probing = Some(generation);
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let ok = matches!(api.proxy_delay(VPN_GROUP, PROBE_URL, PROBE_TIMEOUT_MS).await, Ok(Some(_)));
+            let _ = tx.send(Msg::Probed { generation, retry, ok }).await;
+        });
+    }
+
+    /// Итог проверки: обычной (`retry = false`) или попытки переподключения.
+    async fn probed(&mut self, retry: bool, mut ok: bool) {
+        if !retry {
+            if !ok && self.settings.on_server_down != ServerDownPolicy::Reconnect && self.guard.as_ref().map(Guard::health) == Some(Health::Healthy) {
+                ok = self.switch_to_alternative().await;
+            }
+            if ok && self.running.as_ref().is_some_and(|r| r.started.elapsed() > Duration::from_secs(60)) {
+                self.restarts = 0;
+            }
+        }
+        let now = self.now_ms();
+        let notice = self.guard.as_mut().and_then(|g| g.report(ok, now));
+        self.after_guard(notice);
     }
 
     fn after_guard(&mut self, notice: Option<Notice>) {
