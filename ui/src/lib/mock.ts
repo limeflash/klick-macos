@@ -1,5 +1,6 @@
 // Тестовая служба для превью в браузере: ведёт себя как настоящая, но ничего не трогает.
 
+import { isMac } from './platform';
 import { inKillSwitch, programRule, siteRule } from './live';
 import type { Transport } from './transport';
 import type {
@@ -591,7 +592,7 @@ export function createMockTransport(): Transport {
       return () => void off();
     },
     win: { minimize() {}, hide() {} },
-    pickExe: async () => 'C:\\Games\\Genshin Impact\\Genshin Impact Game\\GenshinImpact.exe',
+    pickExe: async () => (isMac ? '/Applications/Discord.app' : 'C:\\Games\\Genshin Impact\\Genshin Impact Game\\GenshinImpact.exe'),
     openUrl: async (url) => void window.open(url, '_blank', 'noopener'),
     openMain: (target) => console.info('[превью] открыть главное окно', target ?? ''),
     hideTray: () => console.info('[превью] спрятать окно трея'),

@@ -1,10 +1,14 @@
 //! Окно kl!ck: интерфейс из `app/ui`, мост к службе, значок и своё окно трея,
-//! системный прокси по состоянию службы, уведомления Windows.
+//! системный прокси по состоянию службы (на macOS его ставит служба), уведомления Windows и macOS.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod bridge;
 mod notify;
+#[cfg(windows)]
+mod sysproxy;
+#[cfg(not(windows))]
+#[path = "sysproxy_mac.rs"]
 mod sysproxy;
 mod tray;
 
@@ -16,12 +20,29 @@ use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use tauri_plugin_positioner::{Position, WindowExt};
 
 /// Служба для разработки слушает другой канал: `KLICK_DEV=1`.
+#[cfg(windows)]
 fn pipe_name() -> String {
     if std::env::var_os("KLICK_DEV").is_some() {
         r"\\.\pipe\klick-dev".into()
     } else {
         r"\\.\pipe\klick".into()
     }
+}
+
+/// macOS: Unix-сокет службы (`/var/run/klick.sock`), для разработки — `/tmp/klick-dev.sock`.
+#[cfg(not(windows))]
+fn pipe_name() -> String {
+    if std::env::var_os("KLICK_DEV").is_some() {
+        "/tmp/klick-dev.sock".into()
+    } else {
+        "/var/run/klick.sock".into()
+    }
+}
+
+/// Окно запущено из пакета `.app`, а не из папки сборки: от этого зависит, от чьего имени уведомления.
+#[cfg(all(target_os = "macos", feature = "mac-notify"))]
+pub(crate) fn in_app_bundle() -> bool {
+    std::env::current_exe().ok().is_some_and(|p| p.to_string_lossy().contains(".app/Contents/MacOS/"))
 }
 
 pub(crate) fn show_main(app: &AppHandle) {
@@ -103,6 +124,7 @@ fn fit_tray(app: AppHandle, height: f64) {
 }
 
 /// Текст из буфера обмена — «Вставить из буфера» в трее.
+#[cfg(windows)]
 #[tauri::command]
 fn clipboard_text() -> String {
     use windows::Win32::Foundation::{HGLOBAL, HWND};
@@ -131,6 +153,69 @@ fn clipboard_text() -> String {
     }
 }
 
+/// macOS: `pbpaste`. Кодировку он берёт из LANG, а у программ из Finder LANG не задан —
+/// без него кириллица и эмодзи в ссылке превратились бы в знаки вопроса.
+#[cfg(not(windows))]
+#[tauri::command]
+fn clipboard_text() -> String {
+    std::process::Command::new("/usr/bin/pbpaste")
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_ALL", "en_US.UTF-8")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// «Выход»: спросить в окне трея, отключить VPN или оставить его работать.
+fn request_exit(app: &AppHandle) {
+    show_tray(app);
+    let _ = app.emit_to("tray", "klick://exit-request", ());
+}
+
+/// macOS: своё меню приложения. «Выйти из kl!ck» (⌘Q) спрашивает про VPN, как «Выход» в трее;
+/// меню «Правка» нужно, чтобы в полях работали ⌘C, ⌘V и ⌘A.
+#[cfg(target_os = "macos")]
+fn macos_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    use tauri::menu::{PredefinedMenuItem, Submenu};
+    let app_menu = Submenu::with_items(
+        app,
+        "kl!ck",
+        true,
+        &[
+            &PredefinedMenuItem::about(app, Some("О kl!ck"), None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "app-settings", "Настройки…", true, Some("CmdOrCtrl+,"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, Some("Скрыть kl!ck"))?,
+            &PredefinedMenuItem::hide_others(app, Some("Скрыть остальные"))?,
+            &PredefinedMenuItem::show_all(app, Some("Показать все"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "app-quit", "Выйти из kl!ck", true, Some("CmdOrCtrl+Q"))?,
+        ],
+    )?;
+    let edit = Submenu::with_items(
+        app,
+        "Правка",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, Some("Отменить"))?,
+            &PredefinedMenuItem::redo(app, Some("Повторить"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, Some("Вырезать"))?,
+            &PredefinedMenuItem::copy(app, Some("Скопировать"))?,
+            &PredefinedMenuItem::paste(app, Some("Вставить"))?,
+            &PredefinedMenuItem::select_all(app, Some("Выбрать всё"))?,
+        ],
+    )?;
+    let window = Submenu::with_items(
+        app,
+        "Окно",
+        true,
+        &[&PredefinedMenuItem::minimize(app, Some("Свернуть"))?, &PredefinedMenuItem::close_window(app, Some("Закрыть окно"))?],
+    )?;
+    Menu::with_items(app, &[&app_menu, &edit, &window])
+}
+
 #[tauri::command]
 fn open_tray(app: AppHandle) {
     show_tray(&app);
@@ -153,13 +238,31 @@ fn app_exit(app: AppHandle, clear_proxy: bool) {
     app.exit(0);
 }
 
+/// Автозапуск при входе в систему: окно сразу в трей, VPN — по кнопке или «Восстанавливать подключение».
+/// На macOS — агент launchd пользователя (`~/Library/LaunchAgents/app.klick.desktop.plist`).
+fn autostart() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    let builder = tauri_plugin_autostart::Builder::new().args(["--hidden"]);
+    #[cfg(target_os = "macos")]
+    let builder = builder.macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent).app_name("app.klick.desktop");
+    builder.build()
+}
+
 fn main() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_positioner::init())
-        // Автозапуск при входе в Windows: окно сразу в трей, VPN — по кнопке или «Восстанавливать подключение».
-        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--hidden"])))
+        .plugin(autostart());
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(macos_menu).on_menu_event(|app, event| match event.id().as_ref() {
+        "app-quit" => request_exit(app),
+        "app-settings" => {
+            show_main(app);
+            let _ = app.emit_to("main", "klick://navigate", "settings");
+        }
+        _ => {}
+    });
+    builder
         .manage(bridge::Bridge::new(pipe_name()))
         .invoke_handler(tauri::generate_handler![bridge::service_call, bridge::service_up, notify::notify, open_main, open_tray, hide_tray, fit_tray, clipboard_text, app_exit])
         .setup(|app| {
@@ -181,10 +284,7 @@ fn main() {
             tray.on_menu_event(|app, event| match event.id.as_ref() {
                 "open" => show_main(app),
                 // «Выход» спрашивает в окне трея: отключить VPN или оставить его работать.
-                "quit" => {
-                    show_tray(app);
-                    let _ = app.emit_to("tray", "klick://exit-request", ());
-                }
+                "quit" => request_exit(app),
                 _ => {}
             })
             .on_tray_icon_event(|tray, event| {
@@ -209,6 +309,13 @@ fn main() {
             }
             _ => {}
         })
-        .run(tauri::generate_context!())
-        .expect("окно kl!ck не запустилось");
+        .build(tauri::generate_context!())
+        .expect("окно kl!ck не запустилось")
+        .run(|_app, _event| {
+            // macOS: щелчок по значку в Dock, когда окно спрятано в трей, — показать окно.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { has_visible_windows: false, .. } = _event {
+                show_main(_app);
+            }
+        });
 }

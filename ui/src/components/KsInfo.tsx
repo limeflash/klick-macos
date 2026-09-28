@@ -3,6 +3,7 @@
 
 import { useState } from 'react';
 import { routingTitle } from '../lib/i18n';
+import { isMac } from '../lib/platform';
 import type { Routing } from '../lib/types';
 import { Sheet } from './Chrome';
 import { Seg } from './Controls';
@@ -108,6 +109,12 @@ export function KsInfo({ vpnOn, routing, protectedCount, onClose }: { vpnOn: boo
           <div>
             <i style={{ background: 'var(--dim)' }} />
             Локальная сеть для них открыта: роутер, принтер, игры по локалке.
+          </div>
+        )}
+        {on || !isMac ? null : (
+          <div>
+            <i style={{ background: 'var(--dim)' }} />
+            На Mac защиту держит сам kl!ck: пока VPN выключен, трафик проходит через него — защищённые программы он не выпускает, остальные идут напрямую.
           </div>
         )}
       </div>

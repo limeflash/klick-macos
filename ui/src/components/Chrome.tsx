@@ -6,6 +6,7 @@ import statusError from '../assets/status/error.svg';
 import statusEmpty from '../assets/status/no-connection.svg';
 import statusSuccess from '../assets/status/success.svg';
 import statusWarning from '../assets/status/warning.svg';
+import { isMac } from '../lib/platform';
 import { useStore } from '../lib/store';
 import type { VpnState } from '../lib/types';
 import { Icon, type IconName } from './Icon';
@@ -29,7 +30,8 @@ function statusIcon(vpn: VpnState | undefined, empty: boolean, serviceUp: boolea
   }
 }
 
-/** Окно фиксированного размера: кнопки «развернуть» нет. */
+/** Окно фиксированного размера: кнопки «развернуть» нет. На macOS кнопки окна — системные «светофоры»
+ *  слева (заголовок окна прозрачный), свои кнопки не рисуем. */
 export function TitleBar() {
   const { transport, state, serviceUp } = useStore();
   const icon = statusIcon(state?.vpn, !!state && !state.connection, serviceUp);
@@ -40,12 +42,16 @@ export function TitleBar() {
         kl!ck
       </span>
       <div className="drag" data-tauri-drag-region />
-      <button className="tb-btn" aria-label="Свернуть" onClick={() => transport.win.minimize()}>
-        <Icon name="winMin" size={16} />
-      </button>
-      <button className="tb-btn close" aria-label="Свернуть в трей" onClick={() => transport.win.hide()}>
-        <Icon name="winClose" size={16} />
-      </button>
+      {isMac ? null : (
+        <>
+          <button className="tb-btn" aria-label="Свернуть" onClick={() => transport.win.minimize()}>
+            <Icon name="winMin" size={16} />
+          </button>
+          <button className="tb-btn close" aria-label="Свернуть в трей" onClick={() => transport.win.hide()}>
+            <Icon name="winClose" size={16} />
+          </button>
+        </>
+      )}
     </header>
   );
 }

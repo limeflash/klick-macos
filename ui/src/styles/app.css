@@ -71,6 +71,8 @@
 }
 .tb-btn:hover { background: var(--hover); }
 .tb-btn.close:hover { background: #c42b1c; color: #fff; }
+/* macOS: слева системные «светофоры» поверх прозрачного заголовка. */
+.os-mac .titlebar { padding-left: 84px; }
 
 .content {
   flex: 1;

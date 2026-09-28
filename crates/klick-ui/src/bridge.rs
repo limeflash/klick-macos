@@ -1,12 +1,17 @@
 //! Мост окна к службе: команды — отдельным подключением к каналу, события — постоянным.
+//! Windows — именованный канал, macOS — Unix-сокет.
 
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(windows)]
+use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(windows)]
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 
+#[cfg(windows)]
 const ERROR_PIPE_BUSY: i32 = 231;
 
 pub struct Bridge {
@@ -21,6 +26,7 @@ impl Bridge {
     }
 }
 
+#[cfg(windows)]
 async fn open(pipe: &str) -> std::io::Result<NamedPipeClient> {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -32,6 +38,11 @@ async fn open(pipe: &str) -> std::io::Result<NamedPipeClient> {
             Err(e) => return Err(e),
         }
     }
+}
+
+#[cfg(unix)]
+async fn open(socket: &str) -> std::io::Result<tokio::net::UnixStream> {
+    tokio::net::UnixStream::connect(socket).await
 }
 
 fn unreachable() -> Value {

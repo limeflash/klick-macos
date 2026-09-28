@@ -9,11 +9,11 @@ export interface Transport {
   onEvent(cb: (e: KEvent) => void): () => void;
   onService(cb: (up: boolean) => void): () => void;
   win: { minimize(): void; hide(): void };
-  /** «Обзор…»: выбрать exe программы; null — окно выбора закрыли. */
+  /** «Обзор…»: выбрать exe программы (на macOS — пакет .app); null — окно выбора закрыли. */
   pickExe(): Promise<string | null>;
   /** Открыть ссылку в браузере по умолчанию. */
   openUrl(url: string): Promise<void>;
-  /** «Запускать с Windows»: запись автозапуска окна у текущего пользователя. */
+  /** «Запускать с Windows» / «Открывать при входе в систему»: автозапуск окна у текущего пользователя. */
   autostart: { get(): Promise<boolean>; set(on: boolean): Promise<void> };
   /** Показать главное окно (из трея); `target` — какой экран открыть. */
   openMain(target?: string): void;
