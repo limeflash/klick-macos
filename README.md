@@ -46,14 +46,14 @@ sudo '/Applications/kl!ck.app/Contents/MacOS/klick-service' cleanup-network  # �
 На Mac (нужны Xcode Command Line Tools, Rust, Node.js 20.19+):
 
 ```sh
-scripts/macos/build.sh             # dist/kl!ck.app и dist/klick-0.9.0.pkg (universal)
+scripts/macos/build.sh             # dist/kl!ck.app и dist/klick-0.9.1.pkg (universal)
 scripts/macos/build.sh --native    # только архитектура этого Mac — быстрее
-sudo installer -pkg dist/klick-0.9.0.pkg -target /
+sudo installer -pkg dist/klick-0.9.1.pkg -target /
 ```
 
-Выпуск: `git tag v0.9.0 && git push origin v0.9.0` или Actions → Release → Run workflow (тег `v` + версия
+Выпуск: `git tag v0.9.1 && git push origin v0.9.1` или Actions → Release → Run workflow (тег `v` + версия
 из `Cargo.toml` встанет на выбранный коммит) — workflow `.github/workflows/release.yml` соберёт пакет на Mac,
-проверит его и выложит в Releases (`klick-macos.pkg` — для ссылки выше, и `klick-0.9.0.pkg`).
+проверит его и выложит в Releases (`klick-macos.pkg` — для ссылки выше, и `klick-<версия>.pkg`).
 
 ### Разработка
 
