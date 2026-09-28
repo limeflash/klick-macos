@@ -1,0 +1,60 @@
+# Сборка и проверка kl!ck для macOS на настоящем Mac (Apple Silicon): kl!ck.app и .pkg,
+# тесты, конфиги ядра (mihomo -t) и сквозная проверка с установкой службы (scripts/macos/smoke-test.sh).
+name: macOS
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          rustc -V
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Сборка kl!ck.app и .pkg (universal)
+        run: scripts/macos/build.sh
+
+      - name: Тесты
+        run: cargo test --workspace
+
+      - name: Конфиги ядра (mihomo -t)
+        run: scripts/check-configs.sh
+
+      - name: Сквозная проверка на этом Mac
+        run: sudo scripts/macos/smoke-test.sh "dist/kl!ck.app"
+
+      - name: Архив приложения
+        if: always()
+        run: |
+          if [ -d "dist/kl!ck.app" ]; then ditto -c -k --keepParent "dist/kl!ck.app" "dist/klick-macos-app.zip"; fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: klick-macos
+          path: |
+            dist/*.pkg
+            dist/klick-macos-app.zip
+          if-no-files-found: ignore

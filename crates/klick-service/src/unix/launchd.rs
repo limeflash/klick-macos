@@ -65,7 +65,11 @@ struct Source {
 }
 
 fn find_source() -> Result<Source> {
-    let service = std::env::current_exe()?.canonicalize()?;
+    source_near(&std::env::current_exe()?.canonicalize()?)
+}
+
+fn source_near(service: &Path) -> Result<Source> {
+    let service = service.to_path_buf();
     let dir = service.parent().context("нет папки exe")?.to_path_buf();
     let mut cores = vec![dir.join(CORE_EXE)];
     let mut resources = vec![dir.join("resources"), dir.join("../Resources/resources")];
@@ -235,4 +239,33 @@ fn own_tree(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_finds_files_inside_the_app_bundle() {
+        let root = std::env::temp_dir().join(format!("klick-bundle-{}", std::process::id()));
+        let macos = root.join("kl!ck.app/Contents/MacOS");
+        let res = root.join("kl!ck.app/Contents/Resources/resources");
+        std::fs::create_dir_all(&macos).unwrap();
+        std::fs::create_dir_all(res.join("sets")).unwrap();
+        for f in [macos.join(SERVICE_EXE), macos.join(CORE_EXE), res.join("catalog.json")] {
+            std::fs::write(f, b"x").unwrap();
+        }
+        let src = source_near(&macos.join(SERVICE_EXE)).unwrap();
+        assert_eq!(src.core, macos.join(CORE_EXE));
+        assert!(src.resources.join("catalog.json").is_file());
+        assert!(src.resources.ends_with("Contents/Resources/resources") || src.resources.ends_with("../Resources/resources"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn plist_runs_the_installed_service() {
+        let p = plist();
+        assert!(p.contains("<string>/Library/PrivilegedHelperTools/klick/klick-service</string>"));
+        assert!(p.contains("<string>run</string>") && p.contains("<key>KeepAlive</key>"));
+    }
 }
