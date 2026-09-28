@@ -29,6 +29,9 @@ pub const MARKER: &str = "pf.json";
 #[derive(Default, Serialize, Deserialize)]
 struct Marker {
     token: Option<String>,
+    /// Время загрузки macOS, когда получен токен: после перезагрузки старый токен ничего не значит.
+    #[serde(default)]
+    boot: Option<i64>,
 }
 
 /// Правила якоря. Порядок важен: срабатывает первое правило с `quick`.
@@ -77,8 +80,20 @@ fn pfctl(args: &[&str], input: Option<&str>) -> Result<String> {
     Ok(text)
 }
 
+/// Отметка, если она с этой загрузки macOS; иначе пустая.
 fn read_marker(data: &Path) -> Marker {
-    std::fs::read(data.join(MARKER)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    let marker: Marker = std::fs::read(data.join(MARKER)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let now = crate::sys::boot_time();
+    if marker.boot.is_some_and(|b| (b - now).abs() < 120) {
+        marker
+    } else {
+        Marker::default()
+    }
+}
+
+/// Главный набор правил спрашивает якоря `com.apple/*` — иначе наш якорь не работает.
+fn main_ruleset_ok() -> bool {
+    pfctl(&["-s", "rules"], None).is_ok_and(|main| main.contains("anchor \"com.apple/*\""))
 }
 
 /// `Token : 12345` из вывода `pfctl -E`.
@@ -90,19 +105,19 @@ fn parse_token(text: &str) -> Option<String> {
 pub fn apply(data: &Path) -> Result<()> {
     // Главный набор правил должен ссылаться на якоря `com.apple/*` (так в стандартном /etc/pf.conf).
     // Если его заменили или не загружали, загружаем стандартный — иначе наш якорь никто не спросит.
-    let main = pfctl(&["-s", "rules"], None).unwrap_or_default();
-    if !main.contains("anchor \"com.apple/*\"") {
+    if !main_ruleset_ok() {
         tracing::warn!("в правилах pf нет якоря com.apple/*, загружаю /etc/pf.conf");
         pfctl(&["-q", "-f", "/etc/pf.conf"], None).context("загрузка /etc/pf.conf")?;
     }
     pfctl(&["-q", "-a", ANCHOR, "-f", "-"], Some(&rules())).context("правила Kill Switch в pf")?;
     let info = pfctl(&["-s", "info"], None).unwrap_or_default();
     let mut marker = read_marker(data);
+    // Своя ссылка на pf нужна, даже если его включил кто-то другой: иначе он выключит pf, отпуская свою.
     if !info.contains("Status: Enabled") || marker.token.is_none() {
         let out = pfctl(&["-E"], None).context("включение pf")?;
         if let Some(token) = parse_token(&out) {
-            // Старый токен (до перезагрузки) уже недействителен — заменяем.
             marker.token = Some(token);
+            marker.boot = Some(crate::sys::boot_time());
             if let Ok(bytes) = serde_json::to_vec(&marker) {
                 let _ = crate::storage::write_atomic(&data.join(MARKER), &bytes);
             }
@@ -111,11 +126,12 @@ pub fn apply(data: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Правила на месте и pf включён. Другая программа могла сбросить pf (`pfctl -F all`, `pfctl -d`).
+/// Правила на месте и работают: pf включён, главный набор спрашивает наш якорь. Другая программа могла
+/// сбросить pf (`pfctl -F all`, `pfctl -d`) или загрузить свой набор правил без якорей Apple (`pfctl -f`).
 pub fn active() -> bool {
     let info = pfctl(&["-s", "info"], None).unwrap_or_default();
     let ours = pfctl(&["-a", ANCHOR, "-s", "rules"], None).unwrap_or_default();
-    info.contains("Status: Enabled") && ours.contains("block return out quick all")
+    info.contains("Status: Enabled") && ours.contains("block return out quick all") && main_ruleset_ok()
 }
 
 /// Снять правила Kill Switch и отпустить pf. `true` — было что снимать.

@@ -99,12 +99,27 @@ fn describe(path: &str) -> String {
 /// Имя пакета: отображаемое из Info.plist («Google Chrome»), иначе имя папки без `.app`.
 /// Имя папки — то, что человек видит в Finder, поэтому оно важнее короткого `CFBundleName`.
 pub fn bundle_name(bundle: &Path) -> Option<String> {
-    let display = plist::Value::from_file(bundle.join("Contents").join("Info.plist"))
-        .ok()
+    let display = read_info_plist(&bundle.join("Contents").join("Info.plist"))
         .and_then(|v| v.as_dictionary().and_then(|d| d.get("CFBundleDisplayName")).and_then(|n| n.as_string()).map(str::to_string))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty() && s.chars().count() <= 48);
     display.or_else(|| bundle.file_stem().map(|s| s.to_string_lossy().into_owned()).filter(|s| !s.is_empty()))
+}
+
+/// Info.plist из папки пользователя служба читает от root: только обычный файл и не больше 1 МБ.
+/// `O_NONBLOCK` — чтобы подложенный вместо файла канал (FIFO) не повесил службу на открытии.
+fn read_info_plist(path: &Path) -> Option<plist::Value> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    const MAX: u64 = 1 << 20;
+    let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > MAX {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.take(MAX).read_to_end(&mut bytes).ok()?;
+    plist::Value::from_reader(std::io::Cursor::new(bytes)).ok()
 }
 
 #[cfg(test)]
@@ -116,6 +131,18 @@ mod tests {
         let text = "p101\nf12\nTST=ESTABLISHED\nTQR=0\nTQS=0\nf13\nTST=LISTEN\nf14\np202\nf5\nTST=LISTEN\np303\nf7\nTST=CLOSE_WAIT\n";
         assert_eq!(parse_lsof(text), vec![(101, 2), (303, 1)]);
         assert!(parse_lsof("").is_empty());
+    }
+
+    #[test]
+    fn info_plist_must_be_a_regular_file() {
+        let dir = std::env::temp_dir().join(format!("klick-plist-{}", std::process::id()));
+        let contents = dir.join("Fifo.app").join("Contents");
+        std::fs::create_dir_all(&contents).unwrap();
+        let fifo = std::ffi::CString::new(contents.join("Info.plist").to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+        // Канал без писателя: обычное открытие зависло бы навсегда.
+        assert_eq!(bundle_name(&dir.join("Fifo.app")).as_deref(), Some("Fifo"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

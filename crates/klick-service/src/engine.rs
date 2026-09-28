@@ -54,7 +54,7 @@ pub enum Msg {
     /// macOS: пора снова запустить стража после сбоя.
     #[cfg(unix)]
     KsRetry,
-    /// macOS: раз в 30 с проверить, что правила pf и страж на месте.
+    /// macOS: раз в 10 с проверить, что правила pf и страж на месте.
     #[cfg(unix)]
     KsWatchdog,
     Shutdown(oneshot::Sender<()>),
@@ -195,8 +195,28 @@ fn boot_time() -> i64 {
 /// Папка программы из пути: служба видит диск и подсказывает, файл это или папка —
 /// на macOS у программы без пакета `.app` нет расширения, по которому её узнать.
 fn program_folder(input: &str) -> Result<String, InputError> {
-    let is_file = Path::new(input.trim().trim_matches('"')).is_file();
+    let path = Path::new(input.trim().trim_matches('"'));
+    let is_file = path.is_file();
+    // macOS: правило сравнивают с настоящим путём процесса, поэтому ссылки раскрываем
+    // (`/tmp` → `/private/tmp`, программа по символьной ссылке с другого диска).
+    #[cfg(unix)]
+    if let Some(real) = std::fs::canonicalize(path).ok().and_then(|p| p.to_str().map(str::to_string)) {
+        return program_folder_on(Os::CURRENT, &real, Some(is_file));
+    }
     program_folder_on(Os::CURRENT, input, Some(is_file))
+}
+
+/// Дождаться адаптера ядра (адрес 198.18.0.1).
+#[cfg(unix)]
+async fn wait_tun(limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    while !sys::tun_up() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    true
 }
 
 fn read_runtime(paths: &Paths) -> Option<Runtime> {
@@ -245,12 +265,13 @@ pub fn spawn(paths: Paths, profile: Profile) -> anyhow::Result<(EngineHandle, to
             None
         }
     };
-    // macOS: сторож Kill Switch — правила pf могла сбросить другая программа.
+    // macOS: сторож Kill Switch — правила pf могла сбросить другая программа. Проверка — три вызова
+    // pfctl и только пока правила стоят; чем чаще, тем короче окно, если pf выключит кто-то другой.
     #[cfg(unix)]
     {
         let watch_tx = tx.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(30));
+            let mut tick = tokio::time::interval(Duration::from_secs(10));
             tick.tick().await;
             loop {
                 tick.tick().await;
@@ -975,6 +996,17 @@ impl Engine {
     }
 
     async fn start_core(&mut self, capture: Capture) -> Result<(), ErrorInfo> {
+        let result = self.launch_core(capture).await;
+        // macOS: запуск не удался — адаптер сразу отдаём стражу Kill Switch, а не ждём сторожа:
+        // пока TUN ничей, pf не выпускает в интернет ни одну программу пользователя.
+        #[cfg(unix)]
+        if result.is_err() {
+            self.sync_ks_core().await;
+        }
+        result
+    }
+
+    async fn launch_core(&mut self, capture: Capture) -> Result<(), ErrorInfo> {
         let conn_id = self.settings.active_connection.clone().ok_or_else(|| ErrorInfo::new("vpn.no_connection"))?;
         // macOS: адаптер TUN на системе один — страж Kill Switch уступает его основному ядру.
         #[cfg(unix)]
@@ -1008,6 +1040,14 @@ impl Engine {
         let traffic = self.spawn_traffic(api.clone());
         let logs = self.spawn_logs(api);
         self.running = Some(Running { process, generation, capture, layout, traffic, logs, started: Instant::now() });
+        // macOS: ядро работает и без адаптера, если его не удалось создать, — тогда трафик шёл бы мимо
+        // VPN, а подменённый DNS вёл бы в никуда. Это неудачный запуск: переподключение попробует снова.
+        #[cfg(unix)]
+        if capture == Capture::Tun && !wait_tun(Duration::from_secs(10)).await {
+            tracing::error!("адаптер {TUN_DEVICE} не появился за 10 с");
+            self.stop_core().await;
+            return Err(ErrorInfo::new("core.start_failed"));
+        }
         Ok(())
     }
 
@@ -1427,16 +1467,27 @@ impl Engine {
             let marker = self.paths.data.join(netconf::DNS_MARKER);
             let _ = tokio::task::spawn_blocking(move || netconf::dns_apply(&marker)).await;
         }
+        // Прошлый раз вернуть настройки не удалось (networksetup не ответил) — пробуем снова при смене сети.
+        let proxy_left = self.paths.data.join(netconf::PROXY_MARKER);
+        if !self.proxy_applied && netconf::has_leftover(&proxy_left) {
+            let _ = tokio::task::spawn_blocking(move || netconf::proxy_clear(&proxy_left)).await;
+        }
+        let dns_left = self.paths.data.join(netconf::DNS_MARKER);
+        if !self.dns_overridden && netconf::has_leftover(&dns_left) {
+            let _ = tokio::task::spawn_blocking(move || netconf::dns_restore(&dns_left)).await;
+        }
     }
 
-    /// Какие программы закрывает страж: включённые программы Kill Switch, которые есть на диске.
+    /// Какие программы закрывает страж: все включённые программы Kill Switch — и те, которых сейчас
+    /// нет на диске. Программа на внешнем диске или посреди обновления пропадает ненадолго, и снять
+    /// на это время защиту значило бы выпустить её напрямую, как только она появится снова.
     #[cfg(unix)]
     fn ks_folders(&self) -> Vec<String> {
         let ks = &self.settings.kill_switch;
         if !ks.enabled {
             return Vec::new();
         }
-        ks.programs.iter().filter(|p| p.enabled && Path::new(&p.folder).exists()).map(|p| p.folder.clone()).collect()
+        ks.programs.iter().filter(|p| p.enabled).map(|p| p.folder.clone()).collect()
     }
 
     /// Правила Kill Switch в pf: стоят, пока в Kill Switch есть программы, при любом состоянии VPN.
@@ -1454,7 +1505,7 @@ impl Engine {
                 }
                 Err(e) => {
                     tracing::error!("Kill Switch: правила pf не поставились: {e:#}");
-                    // Сторож попробует снова через 30 с; уведомление — один раз, а не на каждую попытку.
+                    // Сторож попробует снова через 10 с; уведомление — один раз, а не на каждую попытку.
                     if self.pf_on != Some(false) {
                         self.notice("killswitch.failed", Value::Null);
                     }
@@ -1469,7 +1520,7 @@ impl Engine {
         }
     }
 
-    /// Раз в 30 с: правила pf на месте (их могла сбросить другая программа), страж работает.
+    /// Раз в 10 с: правила pf на месте (их могла сбросить другая программа), страж работает.
     #[cfg(unix)]
     async fn ks_watchdog(&mut self) {
         if !self.profile.wfp_allowed {

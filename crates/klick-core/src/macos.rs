@@ -95,9 +95,24 @@ fn is_broad_folder(folder: &str) -> bool {
 
 /// Регулярное выражение для всех файлов внутри папки программы. Файловая система macOS обычно
 /// не различает регистр, поэтому и выражение без учёта регистра.
+///
+/// Пакет `.app` узнаётся и там, куда его переносит App Translocation: программу из «Загрузок» или
+/// с образа диска, которую не перенесли в «Программы», macOS запускает из случайной папки
+/// `/private/var/folders/…/AppTranslocation/<UUID>/d/Имя.app`, и путь из правила с ней не совпал бы.
 pub fn folder_regex(folder: &str) -> String {
+    use crate::compile::push_escaped;
+    let folder = folder.trim_end_matches('/');
     let mut re = String::from("(?i)^");
-    crate::compile::push_escaped(&mut re, folder.trim_end_matches('/'));
+    match outer_bundle(folder).filter(|b| *b == folder) {
+        Some(bundle) => {
+            re.push_str("(?:");
+            push_escaped(&mut re, folder);
+            re.push_str("|(?:/private)?/var/folders/.+/AppTranslocation/[^/]+/d/");
+            push_escaped(&mut re, last_segment(bundle));
+            re.push(')');
+        }
+        None => push_escaped(&mut re, folder),
+    }
     re.push_str("/.+$");
     re
 }
@@ -143,7 +158,10 @@ mod tests {
 
     #[test]
     fn regex_matches_everything_inside() {
-        assert_eq!(folder_regex("/Applications/Google Chrome.app"), r"(?i)^/Applications/Google Chrome\.app/.+$");
+        assert_eq!(
+            folder_regex("/Applications/Google Chrome.app"),
+            r"(?i)^(?:/Applications/Google Chrome\.app|(?:/private)?/var/folders/.+/AppTranslocation/[^/]+/d/Google Chrome\.app)/.+$"
+        );
         assert_eq!(folder_regex("/Users/a/Games/Game, Inc (x64)/"), r"(?i)^/Users/a/Games/Game\x2c Inc \(x64\)/.+$");
     }
 }

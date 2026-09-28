@@ -17,6 +17,7 @@ app="$(cd "$(dirname "$app")" && pwd)/$(basename "$app")"
 svc="/Library/PrivilegedHelperTools/klick/klick-service"
 cli() { "$app/Contents/MacOS/klick-cli" --prod "$@"; }
 log="/Library/Application Support/klick/logs/service.log"
+tmp="$(mktemp -d)"
 failed=0
 
 pass() { echo "  ✓ $*"; }
@@ -108,7 +109,7 @@ where() { # where ipcheck-колонка
 cleanup() {
     echo "== уборка"
     [[ -x "$svc" ]] && "$svc" uninstall --wipe >/dev/null 2>&1
-    rm -rf /Users/Shared/klick-ks /tmp/klick-add.json /tmp/klick-lat.json
+    rm -rf /Users/Shared/klick-ks "$tmp"
 }
 trap cleanup EXIT
 
@@ -122,17 +123,17 @@ echo "== установка службы"
 check "служба отвечает" wait_for 20 cli status
 
 echo "== подписка"
-cli add "$KLICK_TEST_SUB" > /tmp/klick-add.json 2>&1 && pass "подписка добавлена" || { fail "подписка добавлена"; head -c 300 /tmp/klick-add.json | sed -E 's#https?://[^" ]+#<ссылка>#g'; echo; }
-json "print('    ' + d['name'], '·', 'истекает' if d.get('info', {}).get('expire') else 'без срока')" < /tmp/klick-add.json 2>/dev/null
-rm -f /tmp/klick-add.json
+cli add "$KLICK_TEST_SUB" > "$tmp/add.json" 2>&1 && pass "подписка добавлена" || { fail "подписка добавлена"; head -c 300 "$tmp/add.json" | sed -E 's#https?://[^" ]+#<ссылка>#g'; echo; }
+json "print('    ' + d['name'], '·', 'истекает' if d.get('info', {}).get('expire') else 'без срока')" < "$tmp/add.json" 2>/dev/null
+rm -f "$tmp/add.json"
 cli servers | json "print('    серверов: %d · %s' % (len(d), ', '.join(sorted({s['kind'] for s in d}))))"
-cli latency > /tmp/klick-lat.json
-json "print('\n'.join('    %-24s %s' % (s['name'], '%d мс' % s['delay'] if s['delay'] else 'нет ответа') for s in d))" < /tmp/klick-lat.json
-json "sys.exit(0 if any(s['delay'] for s in d) else 1)" < /tmp/klick-lat.json && pass "задержка измерена хотя бы у одного" || fail "задержка измерена хотя бы у одного"
+cli latency > "$tmp/lat.json"
+json "print('\n'.join('    %-24s %s' % (s['name'], '%d мс' % s['delay'] if s['delay'] else 'нет ответа') for s in d))" < "$tmp/lat.json"
+json "sys.exit(0 if any(s['delay'] for s in d) else 1)" < "$tmp/lat.json" && pass "задержка измерена хотя бы у одного" || fail "задержка измерена хотя бы у одного"
 fast=()
 while IFS= read -r name; do [[ -n "$name" ]] && fast+=("$name"); done \
-    < <(json "print('\n'.join(s['name'] for s in sorted((s for s in d if s['delay']), key=lambda s: s['delay'])))" < /tmp/klick-lat.json 2>/dev/null)
-rm -f /tmp/klick-lat.json
+    < <(json "print('\n'.join(s['name'] for s in sorted((s for s in d if s['delay']), key=lambda s: s['delay'])))" < "$tmp/lat.json" 2>/dev/null)
+rm -f "$tmp/lat.json"
 if [[ ${#fast[@]} -eq 0 ]]; then
     echo "== ни один сервер не ответил — дальше проверять нечего"
     tail -60 "$log" 2>/dev/null | sed -E 's#https?://[^" ]+#<ссылка>#g'

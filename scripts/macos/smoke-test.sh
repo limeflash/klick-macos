@@ -39,6 +39,8 @@ proxy_on() { scutil --proxy | grep -q "HTTPEnable : 1" && scutil --proxy | grep 
 dns_ours() { scutil --dns | grep -q "nameserver\[0\] : 198.18.0.2"; }
 tun_up() { ifconfig | grep -q "inet 198.18.0.1 "; }
 pf_on() { pfctl -a com.apple/090.klick -s rules 2>/dev/null | grep -q "block return out quick all"; }
+pf_enabled() { pfctl -s info 2>/dev/null | grep -q "Status: Enabled"; }
+ks_has() { cli ks status | grep -q "\"folder\": \"$1\""; }
 
 # Проверки Kill Switch — от имени человека, а не root: root правило pf пропускает (это ядро kl!ck).
 user="${SUDO_USER:-nobody}"
@@ -71,7 +73,7 @@ cleanup() {
     echo "== уборка"
     [[ -n "${server_pid:-}" ]] && kill "$server_pid" 2>/dev/null
     [[ -x "$svc" ]] && "$svc" uninstall --wipe >/dev/null 2>&1
-    rm -rf "$work"
+    rm -rf "$work" /Users/Shared/klick-ks /Users/Shared/klick-ks-link
 }
 trap cleanup EXIT
 
@@ -152,12 +154,29 @@ mkdir -p /Users/Shared/klick-ks/tool
 cp /usr/bin/curl "$ks"
 chmod 755 /Users/Shared/klick-ks /Users/Shared/klick-ks/tool "$ks"
 cli mode tun >/dev/null
+ln -sfn /Users/Shared/klick-ks/tool /Users/Shared/klick-ks-link
 check "программа до Kill Switch ходит напрямую" ks_ok
-check "добавить в Kill Switch" cli ks add /Users/Shared/klick-ks/tool
+check "добавить в Kill Switch по символьной ссылке" cli ks add /Users/Shared/klick-ks-link
+check "в Kill Switch записан настоящий путь, а не ссылка" ks_has /Users/Shared/klick-ks/tool
 check "правила pf стоят" wait_for 10 pf_on
+check "главный набор pf спрашивает якоря Apple" bash -c 'pfctl -s rules 2>/dev/null | grep -q "anchor \"com.apple/\*\""'
 check "страж поднял адаптер при выключенном VPN" wait_for 15 tun_up
 check "защищённая программа без VPN не выходит" ks_never 4
 check "остальные ходят напрямую" user_ok
+
+echo "== Kill Switch: программа пропала с диска (обновление, внешний диск)"
+mv /Users/Shared/klick-ks/tool /Users/Shared/klick-ks/tool.away
+sleep 12
+check "программы нет — правила pf на месте" pf_on
+check "программы нет — страж на месте" tun_up
+mv /Users/Shared/klick-ks/tool.away /Users/Shared/klick-ks/tool
+check "программа вернулась — сразу защищена" ks_never 3
+
+echo "== Kill Switch: pf выключила другая программа"
+pfctl -d >/dev/null 2>&1
+check "pf выключен — защищённая программа всё равно не выходит (страж)" ks_never 3
+check "служба включила pf снова" wait_for 25 pf_enabled
+check "правила pf снова стоят" pf_on
 
 echo "== Kill Switch: сбои при выключенном VPN"
 kill -9 "$(cat /var/run/klick/guard.sock.pid)"
@@ -190,7 +209,7 @@ check "убрать из Kill Switch" cli ks rm /Users/Shared/klick-ks/tool
 check "правила pf сняты" wait_for 10 bash -c '! pfctl -a com.apple/090.klick -s rules 2>/dev/null | grep -q block'
 check "страж остановлен" wait_for 10 bash -c '! ifconfig | grep -q "inet 198.18.0.1 "'
 check "программа снова ходит напрямую" wait_for 10 ks_ok
-rm -rf /Users/Shared/klick-ks
+rm -rf /Users/Shared/klick-ks /Users/Shared/klick-ks-link
 
 echo "== падение службы"
 cli mode proxy >/dev/null

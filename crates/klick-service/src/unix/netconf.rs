@@ -209,26 +209,54 @@ pub fn proxy_apply(spec: &SystemProxy, marker: &Path) -> bool {
 /// Снять прокси kl!ck: вернуть то, что было. Службы, где прокси уже сменили на чужой, не трогаем.
 pub fn proxy_clear(marker: &Path) -> bool {
     let Some(backup) = read_json::<ProxyBackup>(marker) else { return false };
+    let listed = services();
     let mut changed = false;
-    for (svc, saved) in &backup.services {
-        let Some(now) = read_service(svc) else { continue };
+    let mut left = BTreeMap::new();
+    for (svc, saved) in backup.services {
+        let Some(now) = read_service(&svc) else {
+            keep_for_retry(&mut left, &listed, svc, saved);
+            continue;
+        };
         if !now.ours(backup.port) {
             continue;
         }
-        restore_entry(svc, "-setwebproxy", "-setwebproxystate", &saved.web);
-        restore_entry(svc, "-setsecurewebproxy", "-setsecurewebproxystate", &saved.secure);
-        restore_entry(svc, "-setsocksfirewallproxy", "-setsocksfirewallproxystate", &saved.socks);
-        set_list("-setproxybypassdomains", svc, &saved.bypass);
+        restore_entry(&svc, "-setwebproxy", "-setwebproxystate", &saved.web);
+        restore_entry(&svc, "-setsecurewebproxy", "-setsecurewebproxystate", &saved.secure);
+        restore_entry(&svc, "-setsocksfirewallproxy", "-setsocksfirewallproxystate", &saved.socks);
+        set_list("-setproxybypassdomains", &svc, &saved.bypass);
         if let Some(url) = &saved.auto_url {
-            run(&["-setautoproxyurl", svc, url]);
+            run(&["-setautoproxyurl", &svc, url]);
         }
         if saved.auto_discovery {
-            run(&["-setproxyautodiscovery", svc, "on"]);
+            run(&["-setproxyautodiscovery", &svc, "on"]);
         }
         changed = true;
     }
-    let _ = std::fs::remove_file(marker);
+    finish_marker(marker, left.is_empty(), &ProxyBackup { port: backup.port, services: left });
     changed
+}
+
+/// Службу не удалось прочитать (networksetup не ответил — например, в самом начале загрузки): её
+/// прежние настройки остаются в отметке до следующей попытки. Если службы больше нет — забываем.
+fn keep_for_retry<V>(left: &mut BTreeMap<String, V>, listed: &[String], svc: String, saved: V) {
+    if listed.is_empty() || listed.contains(&svc) {
+        tracing::warn!("сетевая служба «{svc}» не ответила, верну её настройки при следующей попытке");
+        left.insert(svc, saved);
+    }
+}
+
+/// Всё вернули — отметку удаляем, иначе оставляем в ней то, что вернуть не удалось.
+fn finish_marker<T: Serialize>(marker: &Path, done: bool, rest: &T) {
+    if done {
+        let _ = std::fs::remove_file(marker);
+    } else {
+        write_json(marker, rest);
+    }
+}
+
+/// Осталась отметка от неудачного восстановления.
+pub fn has_leftover(marker: &Path) -> bool {
+    marker.exists()
 }
 
 fn restore_entry(svc: &str, set: &str, state: &str, e: &Entry) {
@@ -271,15 +299,20 @@ pub fn dns_apply(marker: &Path) -> bool {
 /// Вернуть DNS, который стоял до VPN. Где DNS уже сменили на чужой, не трогаем.
 pub fn dns_restore(marker: &Path) -> bool {
     let Some(backup) = read_json::<DnsBackup>(marker) else { return false };
+    let listed = services();
     let mut changed = false;
-    for (svc, saved) in &backup.services {
-        let Some(now) = run(&["-getdnsservers", svc]).map(|t| parse_list(&t)) else { continue };
+    let mut left = BTreeMap::new();
+    for (svc, saved) in backup.services {
+        let Some(now) = run(&["-getdnsservers", &svc]).map(|t| parse_list(&t)) else {
+            keep_for_retry(&mut left, &listed, svc, saved);
+            continue;
+        };
         if now.len() == 1 && now[0] == DNS_ADDR {
-            set_list("-setdnsservers", svc, saved);
+            set_list("-setdnsservers", &svc, &saved);
             changed = true;
         }
     }
-    let _ = std::fs::remove_file(marker);
+    finish_marker(marker, left.is_empty(), &DnsBackup { services: left });
     if changed {
         flush_dns_cache();
     }

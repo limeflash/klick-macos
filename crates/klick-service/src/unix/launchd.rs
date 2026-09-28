@@ -101,10 +101,23 @@ pub fn install() -> Result<()> {
     let _ = std::fs::remove_file(staging.join("resources/core/mihomo.exe"));
 
     stop();
+    // Старая служба остановлена. Если новая не встанет, некому держать Kill Switch и возвращать сеть:
+    // снимаем правила pf и настройки kl!ck, чтобы неудачная установка не оставила Mac без интернета.
+    if let Err(e) = replace_and_start(&staging, target) {
+        let data = Path::new(crate::paths::DATA_DIR);
+        let _ = netconf::restore_leftovers(data);
+        let _ = pf::clear(data);
+        return Err(e);
+    }
+    println!("служба {LABEL} установлена в {INSTALL_DIR} и запущена");
+    Ok(())
+}
+
+fn replace_and_start(staging: &Path, target: &Path) -> Result<()> {
     if target.exists() {
         std::fs::remove_dir_all(target).with_context(|| format!("не удалить старую {}", target.display()))?;
     }
-    std::fs::rename(&staging, target)?;
+    std::fs::rename(staging, target)?;
     own_tree(target)?;
     // Файлы из загрузок macOS помечает карантином: у службы его быть не должно.
     let _ = Command::new("/usr/bin/xattr").args(["-dr", "com.apple.quarantine", INSTALL_DIR]).status();
@@ -117,10 +130,9 @@ pub fn install() -> Result<()> {
     std::fs::write(PLIST, plist())?;
     std::os::unix::fs::chown(PLIST, Some(0), Some(0))?;
     std::fs::set_permissions(PLIST, std::fs::Permissions::from_mode(0o644))?;
-    launchctl(&["bootstrap", "system", PLIST]).context("launchctl bootstrap")?;
+    // Сначала enable: выключенную (`launchctl disable`) службу launchd не загрузит.
     let _ = launchctl(&["enable", &format!("system/{LABEL}")]);
-    println!("служба {LABEL} установлена в {INSTALL_DIR} и запущена");
-    Ok(())
+    launchctl(&["bootstrap", "system", PLIST]).context("launchctl bootstrap")
 }
 
 /// Остановить и удалить службу. `wipe` — удалить и данные (подключения, настройки, журнал).

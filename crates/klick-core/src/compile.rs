@@ -695,7 +695,7 @@ mod tests {
             Rule { target: Target::Program("/Users/a/Games/Roblox.app".into()), route: Route::Vpn, enabled: true },
         ];
         let r = rules(&s, &catalog(), Os::MacOs);
-        assert!(r.contains(&r"PROCESS-PATH-REGEX,(?i)^/Applications/Telegram\.app/.+$,klick-vpn".to_string()));
+        assert!(r.contains(&r"PROCESS-PATH-REGEX,(?i)^(?:/Applications/Telegram\.app|(?:/private)?/var/folders/.+/AppTranslocation/[^/]+/d/Telegram\.app)/.+$,klick-vpn".to_string()));
         assert!(position(&r, "Roblox") < position(&r, "Games/.+"), "вложенная папка раньше общей");
     }
 
@@ -706,7 +706,7 @@ mod tests {
         s.kill_switch.programs.push(KsProgram { folder: "/Applications/Discord.app".into(), enabled: false });
         let g = compile_guard(&s, &mac_layout());
         let rules: Vec<&str> = g["rules"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
-        assert!(rules.contains(&r"PROCESS-PATH-REGEX,(?i)^/Applications/Telegram\.app/.+$,REJECT"));
+        assert!(rules.contains(&r"PROCESS-PATH-REGEX,(?i)^(?:/Applications/Telegram\.app|(?:/private)?/var/folders/.+/AppTranslocation/[^/]+/d/Telegram\.app)/.+$,REJECT"));
         assert!(!rules.iter().any(|r| r.contains("Discord")), "выключенная программа не блокируется");
         assert!(rules.iter().position(|r| r.contains("192.168.0.0/16")) < rules.iter().position(|r| r.contains("Telegram")), "локальная сеть можно");
         assert_eq!(rules.last(), Some(&"MATCH,DIRECT"));
