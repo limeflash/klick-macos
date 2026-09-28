@@ -77,6 +77,8 @@ trap cleanup EXIT
 
 echo "== $(sw_vers -productName) $(sw_vers -productVersion) $(uname -m)"
 echo "   сетевая служба: $(first_service); DNS: $(networksetup -getdnsservers "$(first_service)" | tr '\n' ' ')"
+# Физический интерфейс — до того, как kl!ck поднимет TUN.
+iface="$(route -n get default 2>/dev/null | awk '/interface:/ {print $2}')"
 
 echo "== установка службы"
 "$app/Contents/MacOS/klick-service" install || { echo "install не удался"; exit 1; }
@@ -88,9 +90,19 @@ check "служба отвечает" wait_for 10 cli status
 cli about
 
 echo "== тестовый сервер"
-cat > "$work/server.yaml" <<'YAML'
+# Сервер ведёт себя как удалённый: выходит в интернет через физический интерфейс мимо TUN kl!ck и сам
+# разрешает имена. Иначе, запущенный при включённом TUN, он запомнит подменные адреса 198.18.x.x
+# из DNS kl!ck, и после отключения VPN они никуда не ведут.
+cat > "$work/server.yaml" <<YAML
 mixed-port: 0
 log-level: warning
+interface-name: ${iface:-en0}
+dns:
+  enable: true
+  ipv6: false
+  nameserver:
+    - 8.8.8.8
+    - https://1.1.1.1/dns-query
 listeners:
   - name: s5
     type: socks
@@ -194,6 +206,8 @@ cli disconnect >/dev/null
 if [[ $failed -gt 0 ]]; then
     echo "--- журнал службы"
     tail -120 "$log" 2>/dev/null
+    echo "--- журнал тестового сервера"
+    tail -30 "$work/server.log" 2>/dev/null
 fi
 
 echo "== удаление"
