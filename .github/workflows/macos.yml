@@ -19,7 +19,7 @@ on:
         required: false
         default: ''
       matrix:
-        description: На всех Mac — ещё macOS 14, 26, 27 (preview) и Intel, с проверкой обновления поверх прошлой версии
+        description: На всех Mac — ещё macOS 14, 26, 27 (preview) и Intel; везде сквозная, подписка и обновление поверх прошлой версии
         type: boolean
         default: false
       release:
@@ -86,6 +86,10 @@ jobs:
           sub="$(jq -r '.inputs.sub // empty' "$GITHUB_EVENT_PATH")"
           sudo /usr/bin/env "KLICK_TEST_SUB=$sub" scripts/macos/real-test.sh "dist/kl!ck.app"
 
+      - name: Обновление поверх прошлой версии
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.matrix }}
+        run: sudo /usr/bin/env "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" scripts/macos/upgrade-test.sh "$(ls dist/klick-[0-9]*.pkg | head -1)"
+
       - name: Архив приложения
         if: always()
         run: |
@@ -133,10 +137,8 @@ jobs:
       - name: Сквозная проверка
         run: sudo scripts/macos/smoke-test.sh "dist/kl!ck.app"
 
-      # Настоящие серверы — на macOS 27 (как у тестера); на остальных хватает проверки в сборке:
-      # одна подписка сразу с пяти Mac может упереться в лимит устройств панели.
       - name: Проверка с настоящими серверами
-        if: ${{ !cancelled() && inputs.sub != '' && matrix.runner == 'xcode-27' }}
+        if: ${{ !cancelled() && inputs.sub != '' }}
         run: |
           sub="$(jq -r '.inputs.sub // empty' "$GITHUB_EVENT_PATH")"
           sudo /usr/bin/env "KLICK_TEST_SUB=$sub" scripts/macos/real-test.sh "dist/kl!ck.app"
