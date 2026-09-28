@@ -159,6 +159,9 @@ pub struct Engine {
     /// macOS: DNS сетевых служб подменён на адрес внутри адаптера (режим VPN).
     #[cfg(unix)]
     dns_overridden: bool,
+    /// macOS: DNS-серверы системы, какими они были до подмены: через них ядро ищет адреса серверов VPN.
+    /// Запоминаются при каждом запуске ядра, пока DNS не подменён; перечитывание конфига берёт последние.
+    server_dns: Vec<String>,
     servers: HashMap<String, Vec<ServerView>>,
     failures: Failures,
     /// Следующая плановая работа: обновление подписок, предупреждения о сроке и трафике.
@@ -324,6 +327,7 @@ pub fn spawn(paths: Paths, profile: Profile) -> anyhow::Result<(EngineHandle, to
         pf_on: None,
         #[cfg(unix)]
         dns_overridden: false,
+        server_dns: Vec::new(),
         servers: HashMap::new(),
         failures: Arc::new(Mutex::new(VecDeque::with_capacity(FAILURES_KEPT))),
         next_maintenance: Instant::now() + Duration::from_secs(60),
@@ -1041,6 +1045,13 @@ impl Engine {
             tun_device: TUN_DEVICE.into(),
             log_level: self.profile.core_log_level.clone(),
         };
+        #[cfg(unix)]
+        if !self.dns_overridden {
+            let found = tokio::task::spawn_blocking(sys::system_dns_servers).await.unwrap_or_default();
+            if !found.is_empty() {
+                self.server_dns = found;
+            }
+        }
         let config_path = self.write_config(&layout, capture, &conn_id)?;
         self.generation += 1;
         let generation = self.generation;
@@ -1079,6 +1090,7 @@ impl Engine {
             capture,
             provider_path: &provider,
             sets: &sets,
+            server_dns: &self.server_dns,
         });
         let path = self.paths.core_home.join("config.yaml");
         let text = serde_json::to_vec_pretty(&cfg).map_err(internal)?;

@@ -64,6 +64,9 @@ pub struct CompileInput<'a> {
     /// Файл серверов активного подключения относительно домашней папки ядра.
     pub provider_path: &'a str,
     pub sets: &'a SetFiles,
+    /// macOS: DNS-серверы самой системы (до подмены DNS на время VPN). Через них ядро ищет адреса
+    /// серверов VPN — так же, как проверочное ядро, которое меряет задержку. Пусто — `system`.
+    pub server_dns: &'a [String],
 }
 
 /// Полный конфиг для работающего VPN.
@@ -84,7 +87,7 @@ pub fn compile(input: &CompileInput) -> Value {
     );
     cfg.insert("rule-providers".into(), rule_providers(s, input.sets));
     cfg.insert("rules".into(), Value::from(rules(s, input.catalog, layout.os)));
-    cfg.insert("dns".into(), dns(s, input.catalog, layout.os));
+    cfg.insert("dns".into(), dns(s, input.catalog, layout.os, input.server_dns));
     cfg.insert("sniffer".into(), sniffer());
     if input.capture == Capture::Tun {
         cfg.insert("tun".into(), tun(layout));
@@ -402,7 +405,24 @@ fn vpn_domains(s: &Settings, catalog: &Catalog) -> Vec<String> {
     out
 }
 
-fn dns(s: &Settings, catalog: &Catalog, os: Os) -> Value {
+/// Адреса серверов VPN. На Windows — зашифрованный DNS Яндекса и Cloudflare.
+/// На macOS сначала DNS системы: проверочное ядро (задержка серверов) ищет адреса через него, и если
+/// основное ядро ищет иначе, задержка «зелёная», а подключение сервер не находит. Зашифрованный DNS —
+/// запасной: ядро спрашивает всех сразу и берёт первый ответ, а DNS роутера отвечает раньше, чем
+/// успевает установиться соединение TLS; не отвечает — выручает зашифрованный.
+fn proxy_server_dns(os: Os, server_dns: &[String]) -> Value {
+    let encrypted = ["https://77.88.8.8/dns-query", "https://1.1.1.1/dns-query"];
+    match os {
+        Os::Windows => json!(encrypted),
+        Os::MacOs => {
+            let mut list: Vec<String> = if server_dns.is_empty() { vec!["system".into()] } else { server_dns.to_vec() };
+            list.extend(encrypted.iter().map(|u| u.to_string()));
+            json!(list)
+        }
+    }
+}
+
+fn dns(s: &Settings, catalog: &Catalog, os: Os, server_dns: &[String]) -> Value {
     let foreign: Vec<String> = DNS_FOREIGN.iter().map(|u| format!("{u}#{VPN_GROUP}")).collect();
     let ru: Vec<String> = DNS_RU.iter().map(|u| u.to_string()).collect();
     let mut policy = Map::new();
@@ -443,7 +463,7 @@ fn dns(s: &Settings, catalog: &Catalog, os: Os) -> Value {
         "nameserver": nameserver,
         "nameserver-policy": policy,
         "direct-nameserver": ru,
-        "proxy-server-nameserver": ["https://77.88.8.8/dns-query", "https://1.1.1.1/dns-query"],
+        "proxy-server-nameserver": proxy_server_dns(os, server_dns),
     })
 }
 
@@ -587,7 +607,7 @@ mod tests {
         assert!(!r.iter().any(|x| x.contains(SET_RU_DOMAINS)));
         assert!(r.contains(&"GEOIP,RU,DIRECT".to_string()));
         assert_eq!(rule_providers(&s, &sets()), json!({}));
-        assert!(dns(&s, &catalog(), Os::Windows)["nameserver-policy"].as_object().unwrap().is_empty());
+        assert!(dns(&s, &catalog(), Os::Windows, &[])["nameserver-policy"].as_object().unwrap().is_empty());
 
         s.russia_direct.ips = false;
         let r = rules(&s, &catalog(), Os::Windows);
@@ -611,7 +631,7 @@ mod tests {
     fn tun_section_only_in_tun_capture() {
         let s = Settings::default();
         let (c, l, st) = (catalog(), layout(), sets());
-        let input = |capture| CompileInput { settings: &s, catalog: &c, layout: &l, capture, provider_path: "providers/a.txt", sets: &st };
+        let input = |capture| CompileInput { settings: &s, catalog: &c, layout: &l, capture, provider_path: "providers/a.txt", sets: &st, server_dns: &[] };
         let tun = compile(&input(Capture::Tun));
         let proxy = compile(&input(Capture::Proxy));
         assert_eq!(tun["tun"]["device"], "klick");
@@ -626,7 +646,7 @@ mod tests {
     fn dns_asks_blocked_names_through_vpn() {
         let mut s = Settings::default();
         s.lists.selected.push(Rule { target: Target::Domain("claude.ai".into()), route: Route::Vpn, enabled: true });
-        let d = dns(&s, &catalog(), Os::Windows);
+        let d = dns(&s, &catalog(), Os::Windows, &[]);
         assert_eq!(d["nameserver"][0], "https://77.88.8.8/dns-query");
         assert_eq!(d["nameserver-policy"]["+.claude.ai"][0], "https://1.1.1.1/dns-query#klick-vpn");
         assert!(d["nameserver-policy"][format!("rule-set:{SET_BLOCKED_DOMAINS}")].is_array());
@@ -640,14 +660,14 @@ mod tests {
         let r = rules(&s, &catalog(), Os::Windows);
         assert!(!r.iter().any(|x| x.contains("claude.ai")), "выключенное правило не работает");
         assert!(r.iter().any(|x| x == "DOMAIN-SUFFIX,chatgpt.com,klick-vpn"));
-        assert!(dns(&s, &catalog(), Os::Windows)["nameserver-policy"].get("+.claude.ai").is_none());
+        assert!(dns(&s, &catalog(), Os::Windows, &[])["nameserver-policy"].get("+.claude.ai").is_none());
 
         s.blocked_preset = false;
         let r = rules(&s, &catalog(), Os::Windows);
         assert!(!r.iter().any(|x| x.contains(SET_BLOCKED_DOMAINS) || x.contains(SET_BLOCKED_IPS)));
         assert_eq!(r.last().unwrap(), "MATCH,DIRECT");
         assert_eq!(rule_providers(&s, &sets()), json!({}));
-        assert!(dns(&s, &catalog(), Os::Windows)["nameserver-policy"].get(format!("rule-set:{SET_BLOCKED_DOMAINS}")).is_none());
+        assert!(dns(&s, &catalog(), Os::Windows, &[])["nameserver-policy"].get(format!("rule-set:{SET_BLOCKED_DOMAINS}")).is_none());
     }
 
     #[test]
@@ -674,14 +694,14 @@ mod tests {
     fn macos_config_uses_unix_socket_and_system_tun_name() {
         let s = Settings::default();
         let (c, l, st) = (catalog(), mac_layout(), sets());
-        let cfg = compile(&CompileInput { settings: &s, catalog: &c, layout: &l, capture: Capture::Tun, provider_path: "providers/a.txt", sets: &st });
+        let cfg = compile(&CompileInput { settings: &s, catalog: &c, layout: &l, capture: Capture::Tun, provider_path: "providers/a.txt", sets: &st, server_dns: &[] });
         assert_eq!(cfg["external-controller-unix"], "/Library/Application Support/klick/run/core.sock");
         assert!(cfg.get("external-controller-pipe").is_none());
         assert!(cfg["tun"].get("device").is_none(), "на macOS имя utunN выбирает ядро");
         assert_eq!(cfg["tun"]["auto-route"], true);
         let filter = cfg["dns"]["fake-ip-filter"].as_array().unwrap();
         assert!(filter.iter().any(|f| f == "captive.apple.com"));
-        let windows = compile(&CompileInput { settings: &s, catalog: &c, layout: &layout(), capture: Capture::Tun, provider_path: "providers/a.txt", sets: &st });
+        let windows = compile(&CompileInput { settings: &s, catalog: &c, layout: &layout(), capture: Capture::Tun, provider_path: "providers/a.txt", sets: &st, server_dns: &[] });
         assert!(!windows["dns"]["fake-ip-filter"].as_array().unwrap().iter().any(|f| f == "captive.apple.com"));
         assert_eq!(windows["tun"]["device"], "klick");
     }
@@ -697,6 +717,15 @@ mod tests {
         let r = rules(&s, &catalog(), Os::MacOs);
         assert!(r.contains(&r"PROCESS-PATH-REGEX,(?i)^(?:/Applications/Telegram\.app|(?:/private)?/var/folders/.+/AppTranslocation/[^/]+/d/Telegram\.app)/.+$,klick-vpn".to_string()));
         assert!(position(&r, "Roblox") < position(&r, "Games/.+"), "вложенная папка раньше общей");
+    }
+
+    #[test]
+    fn macos_finds_vpn_servers_through_system_dns_first() {
+        let windows = proxy_server_dns(Os::Windows, &["192.168.1.1".into()]);
+        assert_eq!(windows, json!(["https://77.88.8.8/dns-query", "https://1.1.1.1/dns-query"]));
+        let mac = proxy_server_dns(Os::MacOs, &["192.168.1.1".into()]);
+        assert_eq!(mac, json!(["192.168.1.1", "https://77.88.8.8/dns-query", "https://1.1.1.1/dns-query"]));
+        assert_eq!(proxy_server_dns(Os::MacOs, &[])[0], "system");
     }
 
     #[test]

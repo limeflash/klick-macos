@@ -23,6 +23,47 @@ pub fn is_elevated() -> bool {
 
 /// Папка данных рабочей службы: только root. Там лежат ключи серверов, поэтому обычные программы
 /// пользователя их читать не должны. Администратор по-прежнему может открыть её через sudo.
+/// DNS-серверы, которыми сейчас пользуется система: основной резолвер из `scutil --dns`.
+/// Без подменного адреса kl!ck (198.18.x.x) и адресов с зоной (`fe80::1%en0`).
+pub fn system_dns_servers() -> Vec<String> {
+    if !cfg!(target_os = "macos") {
+        return Vec::new();
+    }
+    match run_within("/usr/sbin/scutil", &["--dns"], None, std::time::Duration::from_secs(5)) {
+        Ok(out) => parse_scutil_dns(&String::from_utf8_lossy(&out.stdout)),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn parse_scutil_dns(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_first = false;
+    for line in text.lines() {
+        let line = line.trim();
+        // Первый блок «resolver #1» до раздела для отдельных интерфейсов — тот, что спрашивает система.
+        if line.starts_with("DNS configuration (for scoped queries)") {
+            break;
+        }
+        if line.starts_with("resolver #") {
+            if in_first {
+                break;
+            }
+            in_first = line == "resolver #1";
+            continue;
+        }
+        if !in_first || !line.starts_with("nameserver[") {
+            continue;
+        }
+        let Some(addr) = line.split_once(':').map(|(_, a)| a.trim()) else { continue };
+        let Ok(ip) = addr.parse::<IpAddr>() else { continue };
+        let ours = matches!(ip, IpAddr::V4(v4) if v4.octets()[0] == 198 && (v4.octets()[1] & 0xFE) == 18);
+        if !ours && !ip.is_unspecified() && !out.contains(&ip.to_string()) {
+            out.push(ip.to_string());
+        }
+    }
+    out
+}
+
 /// Выполнить системную программу, но не дольше `limit`: зависшая (networksetup ждёт блокировку
 /// настроек сети, lsof — сетевой диск) убивается, и служба не встаёт вместе с ней.
 /// Вывод читается сразу, чтобы большой вывод не упёрся в буфер канала.
@@ -403,6 +444,14 @@ mod tests {
         *broken.last_mut().unwrap() ^= 1;
         assert!(unprotect(&broken).is_err());
         assert!(unprotect(b"KLK1").is_err());
+    }
+
+    #[test]
+    fn system_dns_is_the_main_resolver() {
+        let text = "\nDNS configuration\n\nresolver #1\n  search domain[0] : lan\n  nameserver[0] : 192.168.1.1\n  nameserver[1] : fe80::1%en0\n  nameserver[2] : 2a02:6b8::feed:0ff\n  if_index : 6 (en0)\n\nresolver #2\n  domain   : local\n  nameserver[0] : 10.0.0.1\n\nDNS configuration (for scoped queries)\n\nresolver #1\n  nameserver[0] : 8.8.4.4\n";
+        assert_eq!(parse_scutil_dns(text), vec!["192.168.1.1".to_string(), "2a02:6b8::feed:ff".to_string()]);
+        // Подменный DNS kl!ck — не системный.
+        assert!(parse_scutil_dns("resolver #1\n  nameserver[0] : 198.18.0.2\n").is_empty());
     }
 
     #[test]

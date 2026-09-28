@@ -77,6 +77,8 @@ fn main() {
             capture: if other == "tun" { Capture::Tun } else { Capture::Proxy },
             provider_path: "providers/test.txt",
             sets: &sets,
+            // Как на Mac с роутером: DNS системы первым.
+            server_dns: &["192.168.1.1".to_string()],
         }),
     };
     println!("{}", serde_json::to_string_pretty(&cfg).unwrap());
