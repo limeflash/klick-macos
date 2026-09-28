@@ -100,6 +100,12 @@ pub fn install() -> Result<()> {
     let _ = std::fs::remove_file(staging.join("resources/core").join(CORE_EXE));
     let _ = std::fs::remove_file(staging.join("resources/core/mihomo.exe"));
 
+    // Пакет не подписан сертификатом Apple: если macOS перенесла на программу метку карантина со скачанного
+    // пакета, первый запуск упрётся в Gatekeeper. Установку уже разрешил администратор — метку снимаем.
+    if let Some(bundle) = src.service.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")) {
+        sys::strip_quarantine(bundle);
+    }
+
     stop();
     // Старая служба остановлена. Если новая не встанет, некому держать Kill Switch и возвращать сеть:
     // снимаем правила pf и настройки kl!ck, чтобы неудачная установка не оставила Mac без интернета.
@@ -120,7 +126,7 @@ fn replace_and_start(staging: &Path, target: &Path) -> Result<()> {
     std::fs::rename(staging, target)?;
     own_tree(target)?;
     // Файлы из загрузок macOS помечает карантином: у службы его быть не должно.
-    let _ = Command::new("/usr/bin/xattr").args(["-dr", "com.apple.quarantine", INSTALL_DIR]).status();
+    sys::strip_quarantine(target);
 
     // Папка данных нужна до запуска: в неё launchd пишет ошибки службы.
     let data = Path::new(crate::paths::DATA_DIR);

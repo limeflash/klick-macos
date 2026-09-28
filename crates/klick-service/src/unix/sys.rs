@@ -23,6 +23,31 @@ pub fn is_elevated() -> bool {
 
 /// Папка данных рабочей службы: только root. Там лежат ключи серверов, поэтому обычные программы
 /// пользователя их читать не должны. Администратор по-прежнему может открыть её через sudo.
+/// Снять метку карантина (`com.apple.quarantine`) со всего дерева. Системным вызовом, а не
+/// `/usr/bin/xattr`: тот написан на Python и на Mac без инструментов разработчика просит их поставить.
+pub fn strip_quarantine(root: &Path) {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let name = c"com.apple.quarantine";
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(path) = stack.pop() {
+            if let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) {
+                // Метки может и не быть (ENOATTR) — это нормально.
+                unsafe { libc::removexattr(c.as_ptr(), name.as_ptr(), libc::XATTR_NOFOLLOW) };
+            }
+            // По ссылкам не идём: снимаем только внутри своего дерева.
+            if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+                if let Ok(entries) = std::fs::read_dir(&path) {
+                    stack.extend(entries.flatten().map(|e| e.path()));
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = root;
+}
+
 pub fn restrict_to_admins(path: &Path) -> Result<()> {
     std::os::unix::fs::chown(path, Some(0), Some(0)).with_context(|| format!("chown {}", path.display()))?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).with_context(|| format!("chmod {}", path.display()))

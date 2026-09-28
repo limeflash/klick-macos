@@ -83,7 +83,10 @@ echo "   сетевая служба: $(first_service); DNS: $(networksetup -get
 iface="$(route -n get default 2>/dev/null | awk '/interface:/ {print $2}')"
 
 echo "== установка службы"
+# Метка карантина, как у программы из скачанного пакета: установка должна снять её сама, без /usr/bin/xattr.
+xattr -w com.apple.quarantine "0083;00000000;Safari;" "$app/Contents/Info.plist"
 "$app/Contents/MacOS/klick-service" install || { echo "install не удался"; exit 1; }
+check "метка карантина с программы снята" bash -c "! xattr -p com.apple.quarantine '$app/Contents/Info.plist'"
 check "служба в launchd" launchctl print system/app.klick.service
 check "сокет /var/run/klick.sock появился" wait_for 15 test -S /var/run/klick.sock
 check "сокет root:staff 660" test "$(stat -f '%Su:%Sg %Lp' /var/run/klick.sock)" = "root:staff 660"
