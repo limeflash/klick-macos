@@ -1,5 +1,41 @@
 # kl!ck — исходники новой версии
 
+## macOS
+
+Эта ветка — порт kl!ck 0.9.0 на macOS 12+ (Apple Silicon и Intel). Код Windows не менялся по поведению,
+всё macOS-специфичное — отдельно (`crates/klick-service/src/unix`, `#[cfg]`), поэтому обновления
+Windows-версии вливаются сюда обычным `git merge`. Подробно — **[docs/macos-port.md](docs/macos-port.md)**:
+что чем заменено, нюансы платформы (TUN и DNS, системный прокси, Kill Switch без WFP, подпись),
+что проверено, чек-лист ручной проверки и план для iOS.
+
+На Mac (нужны Xcode Command Line Tools, Rust, Node.js 20.19+):
+
+```
+scripts/macos/build.sh             # dist/kl!ck.app и dist/klick-0.9.0.pkg (universal)
+scripts/macos/build.sh --native    # только архитектура этого Mac — быстрее
+```
+
+`.pkg` ставит окно в «Программы» и службу (демон launchd `app.klick.service`, файлы в
+`/Library/PrivilegedHelperTools/klick`, данные в `/Library/Application Support/klick`).
+Удаление: `sudo "/Applications/kl!ck.app/Contents/Resources/uninstall.sh" [--wipe]`.
+
+Служба для разработки на Mac — как на Windows, только канал — `/tmp/klick-dev.sock`:
+
+```
+scripts/macos/fetch-core.sh                                        # ядро mihomo для macOS в resources/core/mihomo
+cargo build -p klick-service -p klick-cli
+sudo target/debug/klick-service console --allow-tun --allow-ks     # без sudo — только порт, без TUN и системного прокси
+target/debug/klick-cli status
+KLICK_DEV=1 cargo run -p klick-ui
+```
+
+Превью интерфейса в браузере как на Mac: `http://127.0.0.1:5173/?os=mac&s=connected`.
+Проверки: `cargo test`, `scripts/check-configs.sh` (все конфиги через `mihomo -t`),
+`sudo scripts/macos/smoke-test.sh "dist/kl!ck.app"` (сквозная, меняет настройки сети — только на тестовом Mac)
+и workflow `.github/workflows/macos.yml` на раннере GitHub с macOS.
+
+Дальше — исходное описание Windows-версии.
+
 Архитектура и решения — в `..\brief\03-architecture.md`, функции — в `..\brief\02-feature-map.md`, расхождения с макетами — в `..\brief\04-design-review.md`.
 
 ## Состав
