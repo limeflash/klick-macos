@@ -1,7 +1,7 @@
 # kl!ck на macOS: как устроен порт, нюансы платформы и план для iOS
 
 kl!ck — [vbu00](https://github.com/vbu00) (разработка) и [Dmitriy Medvedev](https://github.com/aleuuu)
-(дизайн интерфейса и логотип). Порт на macOS — [Daniyar Ennanov](https://github.com/limeflash).
+(дизайн интерфейса и логотип). Порт на macOS — [Daniyar Ennanov](https://github.com/ennanoff).
 
 Порт сделан поверх исходников kl!ck 0.9.0 (Windows). Главное правило: **код Windows не менялся по
 поведению**, а всё macOS-специфичное лежит отдельно (`crates/klick-service/src/unix/…`, `#[cfg(…)]`

@@ -181,7 +181,7 @@ fn request_exit(app: &AppHandle) {
 fn about_metadata() -> tauri::menu::AboutMetadata<'static> {
     tauri::menu::AboutMetadata {
         credits: Some(
-            "Разработка — vbu00 (github.com/vbu00)\nДизайн интерфейса и логотип — Dmitriy Medvedev (github.com/aleuuu)\nПорт на macOS — Daniyar Ennanov (github.com/limeflash)".into(),
+            "Разработка — vbu00 (github.com/vbu00)\nДизайн интерфейса и логотип — Dmitriy Medvedev (github.com/aleuuu)\nПорт на macOS — Daniyar Ennanov (github.com/ennanoff)".into(),
         ),
         copyright: Some(COPYRIGHT.into()),
         ..Default::default()
