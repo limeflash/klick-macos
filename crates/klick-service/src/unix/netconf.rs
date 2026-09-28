@@ -68,7 +68,7 @@ fn run(args: &[&str]) -> Option<String> {
     if !cfg!(target_os = "macos") {
         return None;
     }
-    let out = std::process::Command::new(NETWORKSETUP).args(args).output().ok()?;
+    let out = crate::sys::run_within(NETWORKSETUP, args, None, std::time::Duration::from_secs(10)).ok()?;
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     // networksetup часто завершается с кодом 0 и пишет ошибку в stdout.
     if !out.status.success() || text.contains("** Error") {

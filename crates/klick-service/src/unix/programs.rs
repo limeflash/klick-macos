@@ -41,7 +41,7 @@ pub fn scan(own: &[PathBuf]) -> Vec<ProgramView> {
 
 /// Сколько сетевых сокетов у каждого процесса. Слушающие TCP-сокеты не считаем: это не активность.
 fn socket_owners() -> Vec<(i32, u32)> {
-    let out = match std::process::Command::new(LSOF).args(["-n", "-P", "-w", "-i", "-F", "pfT"]).output() {
+    let out = match sys::run_within(LSOF, &["-n", "-P", "-w", "-i", "-F", "pfT"], None, std::time::Duration::from_secs(10)) {
         Ok(o) => o,
         Err(e) => {
             tracing::warn!("lsof не запустился: {e}");

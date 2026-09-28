@@ -23,6 +23,48 @@ pub fn is_elevated() -> bool {
 
 /// Папка данных рабочей службы: только root. Там лежат ключи серверов, поэтому обычные программы
 /// пользователя их читать не должны. Администратор по-прежнему может открыть её через sudo.
+/// Выполнить системную программу, но не дольше `limit`: зависшая (networksetup ждёт блокировку
+/// настроек сети, lsof — сетевой диск) убивается, и служба не встаёт вместе с ней.
+/// Вывод читается сразу, чтобы большой вывод не упёрся в буфер канала.
+pub fn run_within(program: &str, args: &[&str], input: Option<&str>, limit: std::time::Duration) -> std::io::Result<std::process::Output> {
+    use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
+        let _ = stdin.write_all(text.as_bytes());
+    }
+    let read_all = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let out = read_all(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let err = read_all(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let deadline = std::time::Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            tracing::warn!("{program} {} не ответил за {} с — остановлен", args.first().copied().unwrap_or(""), limit.as_secs());
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("{program}: тайм-аут")));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    Ok(std::process::Output { status, stdout: out.join().unwrap_or_default(), stderr: err.join().unwrap_or_default() })
+}
+
 /// Снять метку карантина (`com.apple.quarantine`) со всего дерева. Системным вызовом, а не
 /// `/usr/bin/xattr`: тот написан на Python и на Mac без инструментов разработчика просит их поставить.
 pub fn strip_quarantine(root: &Path) {
@@ -361,6 +403,18 @@ mod tests {
         *broken.last_mut().unwrap() ^= 1;
         assert!(unprotect(&broken).is_err());
         assert!(unprotect(b"KLK1").is_err());
+    }
+
+    #[test]
+    fn hung_programs_are_stopped() {
+        let t = std::time::Instant::now();
+        let r = run_within("/bin/sleep", &["30"], None, std::time::Duration::from_millis(300));
+        assert!(r.is_err() && t.elapsed() < std::time::Duration::from_secs(5));
+        let ok = run_within("/bin/cat", &[], Some("привет"), std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(String::from_utf8_lossy(&ok.stdout), "привет");
+        // Вывод больше буфера канала не подвешивает ожидание.
+        let big = run_within("/bin/sh", &["-c", "head -c 300000 /dev/zero"], None, std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(big.stdout.len(), 300_000);
     }
 
     #[test]

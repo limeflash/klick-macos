@@ -17,7 +17,6 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::process::Command;
 
 const PFCTL: &str = "/sbin/pfctl";
 /// Якорь внутри `com.apple/*`: стандартный `/etc/pf.conf` macOS уже ссылается на него, свой главный
@@ -60,18 +59,7 @@ fn pfctl(args: &[&str], input: Option<&str>) -> Result<String> {
     if !cfg!(target_os = "macos") {
         bail!("pf есть только на macOS");
     }
-    use std::io::Write;
-    let mut child = Command::new(PFCTL)
-        .args(args)
-        .stdin(if input.is_some() { std::process::Stdio::piped() } else { std::process::Stdio::null() })
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("pfctl")?;
-    if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
-        stdin.write_all(text.as_bytes())?;
-    }
-    let out = child.wait_with_output()?;
+    let out = crate::sys::run_within(PFCTL, args, input, std::time::Duration::from_secs(10)).context("pfctl")?;
     // pfctl пишет обычный вывод и в stderr («pf enabled», «Token : …», предупреждения ALTQ).
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     if !out.status.success() {
