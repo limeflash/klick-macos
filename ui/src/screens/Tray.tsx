@@ -180,7 +180,7 @@ export function Tray() {
               Служба не отвечает
             </span>
             <span className="tr-big sm">Нет связи</span>
-            <span className="tr-sub">Переустановите kl!ck или перезагрузите компьютер</span>
+            <span className="tr-sub">{isMac ? 'Откройте окно kl!ck — там можно перезапустить службу' : 'Переустановите kl!ck или перезагрузите компьютер'}</span>
           </span>
         </div>
         <Footer onOpen={() => transport.openMain()} onExit={onExit} />

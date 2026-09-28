@@ -22,6 +22,8 @@ export interface Transport {
   fitTray(height: number): void;
   /** Текст из буфера обмена: «Вставить из буфера». */
   clipboardText(): Promise<string>;
+  /** macOS: переустановить и запустить службу (спросит пароль администратора); `cancelled` — пароль не ввели. */
+  repairService(): Promise<void>;
   /** Закрыть kl!ck; `clearProxy` — VPN выключили, снять и системный прокси. */
   exit(clearProxy: boolean): Promise<void>;
   /** Главное окно сейчас перед глазами: тогда вместо уведомления Windows — сообщение в окне. */

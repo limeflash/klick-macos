@@ -254,6 +254,44 @@ fn app_exit(app: AppHandle, clear_proxy: bool) {
     app.exit(0);
 }
 
+/// «Перезапустить службу» на экране «Служба не отвечает»: переустановить её из этой программы.
+/// macOS спрашивает пароль администратора своим окном. VPN после перезапуска выключен — служба
+/// не начнёт переподключаться сама, если зависла именно на этом.
+#[tauri::command]
+async fn repair_service() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let service = std::env::current_exe().map_err(|e| e.to_string())?.with_file_name("klick-service");
+        let script = format!(
+            "rm -f {} ; {} install",
+            sh_quote("/Library/Application Support/klick/runtime.json"),
+            sh_quote(&service.to_string_lossy())
+        );
+        let apple = format!(
+            "do shell script \"{}\" with administrator privileges with prompt \"kl!ck перезапустит свою службу.\"",
+            script.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        let out = tauri::async_runtime::spawn_blocking(move || std::process::Command::new("/usr/bin/osascript").args(["-e", &apple]).output())
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        if out.status.success() {
+            return Ok(());
+        }
+        let err = String::from_utf8_lossy(&out.stderr);
+        // -128 — нажали «Отменить» в окне пароля.
+        return Err(if err.contains("-128") { "cancelled".into() } else { err.trim().to_string() });
+    }
+    #[cfg(not(target_os = "macos"))]
+    Err("unsupported".into())
+}
+
+/// Строка для /bin/sh в одинарных кавычках: `kl!ck` и пробелы внутри безопасны.
+#[cfg(target_os = "macos")]
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Автозапуск при входе в систему: окно сразу в трей, VPN — по кнопке или «Восстанавливать подключение».
 /// На macOS — агент launchd пользователя (`~/Library/LaunchAgents/app.klick.desktop.plist`).
 fn autostart() -> tauri::plugin::TauriPlugin<tauri::Wry> {
@@ -280,7 +318,7 @@ fn main() {
     });
     builder
         .manage(bridge::Bridge::new(pipe_name()))
-        .invoke_handler(tauri::generate_handler![bridge::service_call, bridge::service_up, notify::notify, open_main, open_tray, hide_tray, fit_tray, clipboard_text, app_exit])
+        .invoke_handler(tauri::generate_handler![bridge::service_call, bridge::service_up, notify::notify, open_main, open_tray, hide_tray, fit_tray, clipboard_text, app_exit, repair_service])
         .setup(|app| {
             bridge::start_events(app.handle().clone());
             fit_main(app.handle());

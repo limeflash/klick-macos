@@ -1,6 +1,6 @@
 // Рамка окна: заголовок с кнопками, нижняя панель, всплывающие сообщения, лист снизу, «служба не отвечает».
 
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import statusDefault from '../assets/status/default.svg';
 import statusError from '../assets/status/error.svg';
 import statusEmpty from '../assets/status/no-connection.svg';
@@ -122,19 +122,38 @@ export function Sheet({ onClose, children, tall }: { onClose: () => void; childr
 }
 
 export function Offline() {
-  const { serviceUp, transport, state } = useStore();
+  const { serviceUp, transport, state, toast } = useStore();
+  const [busy, setBusy] = useState(false);
   if (serviceUp) return null;
+  // macOS: службу можно поднять прямо отсюда — система спросит пароль администратора.
+  const canRepair = isMac;
+  const repair = async () => {
+    setBusy(true);
+    try {
+      await transport.repairService();
+      toast('Служба перезапущена', 'VPN выключен — включите его, когда будете готовы', 'ok');
+    } catch (e) {
+      if (String(e) !== 'cancelled') toast('Службу не удалось перезапустить', String(e).slice(0, 160), 'bad');
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <div className="offline">
       <b>Служба kl!ck не отвечает</b>
       <span>
-        {transport.kind === 'tauri'
-          ? 'Окно работает, но без службы VPN не включить. Переустановите kl!ck или перезагрузите компьютер.'
-          : 'Тестовая служба недоступна.'}
-        {transport.kind === 'tauri' && isMac && state?.kill_switch
-          ? ' Если в Kill Switch есть программы, прямые подключения закрыты, пока служба не вернётся.'
-          : null}
+        {transport.kind !== 'tauri' && !canRepair
+          ? 'Тестовая служба недоступна.'
+          : canRepair
+            ? 'Окно работает, но без службы VPN не включить. Перезапустите её — macOS спросит пароль администратора.'
+            : 'Окно работает, но без службы VPN не включить. Переустановите kl!ck или перезагрузите компьютер.'}
+        {isMac && state?.kill_switch ? ' Если в Kill Switch есть программы, прямые подключения закрыты, пока служба не вернётся.' : null}
       </span>
+      {canRepair ? (
+        <button className="offline-action" disabled={busy} onClick={() => void repair()}>
+          {busy ? 'Перезапускаю…' : 'Перезапустить службу'}
+        </button>
+      ) : null}
     </div>
   );
 }

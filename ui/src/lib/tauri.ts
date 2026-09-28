@@ -45,6 +45,7 @@ export function createTauriTransport(): Transport {
     hideTray: () => void invoke('hide_tray'),
     fitTray: (height) => void invoke('fit_tray', { height }),
     clipboardText: () => invoke<string>('clipboard_text'),
+    repairService: () => invoke('repair_service'),
     exit: (clearProxy) => invoke('app_exit', { clearProxy }),
     isActive: async () => (await win.isVisible()) && (await win.isFocused()) && !(await win.isMinimized()),
     notify: (title, text, target) => invoke('notify', { title, text, target: target ?? null }),
