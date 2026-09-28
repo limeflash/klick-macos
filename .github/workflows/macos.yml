@@ -2,9 +2,12 @@
 # тесты, конфиги ядра (mihomo -t) и сквозная проверка с установкой службы (scripts/macos/smoke-test.sh).
 name: macOS
 
+# Правки только документации сборку на Mac не запускают.
 on:
   push:
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE']
   pull_request:
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE']
   workflow_dispatch:
 
 # Новый пуш ждёт, пока доработает текущая сборка, а не отменяет её (ждёт только самый свежий).
