@@ -6,3 +6,7 @@ ui/dist/
 crates/klick-ui/gen/
 crates/klick-setup/gen/
 dist/
+# Ядро mihomo не хранится в git: Windows — см. README, macOS — scripts/macos/fetch-core.sh
+resources/core/mihomo
+resources/core/mihomo.exe
+crates/klick-ui/binaries/

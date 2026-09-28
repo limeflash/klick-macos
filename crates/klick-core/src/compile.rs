@@ -5,6 +5,7 @@
 //! готовые наборы → всё остальное. Срабатывает первое подходящее правило.
 
 use crate::model::{Catalog, Route, Routing, Rule, Settings, Target};
+use crate::os::Os;
 use serde_json::{json, Map, Value};
 
 /// Группа, через которую идёт всё «через VPN». Сервер в ней выбирается через API ядра.
@@ -33,7 +34,10 @@ pub enum Capture {
 /// Имена и порты, которые выбирает служба.
 #[derive(Clone, Debug)]
 pub struct CoreLayout {
-    pub controller_pipe: String,
+    /// Для какой системы конфиг: путь к программам, вход управления и адаптер TUN устроены по-разному.
+    pub os: Os,
+    /// Вход управления ядра: именованный канал на Windows, Unix-сокет на macOS.
+    pub controller: String,
     pub secret: String,
     pub mixed_port: u16,
     /// Служебный вход «через VPN» для проверки IP и скачиваний.
@@ -79,24 +83,71 @@ pub fn compile(input: &CompileInput) -> Value {
         ]),
     );
     cfg.insert("rule-providers".into(), rule_providers(s, input.sets));
-    cfg.insert("rules".into(), Value::from(rules(s, input.catalog)));
-    cfg.insert("dns".into(), dns(s, input.catalog));
+    cfg.insert("rules".into(), Value::from(rules(s, input.catalog, layout.os)));
+    cfg.insert("dns".into(), dns(s, input.catalog, layout.os));
     cfg.insert("sniffer".into(), sniffer());
     if input.capture == Capture::Tun {
-        cfg.insert(
-            "tun".into(),
-            json!({
-                "enable": true,
-                "stack": "gvisor",
-                "device": layout.tun_device,
-                "auto-route": true,
-                "auto-detect-interface": true,
-                "strict-route": true,
-                "dns-hijack": ["any:53", "tcp://any:53"],
-            }),
-        );
+        cfg.insert("tun".into(), tun(layout));
     }
     Value::Object(cfg)
+}
+
+/// Адаптер TUN. На macOS адаптер обязан называться `utunN`, и номер выбирает само ядро:
+/// своё имя ядро там отвергает. Служба находит адаптер по адресу 198.18.0.1.
+fn tun(layout: &CoreLayout) -> Value {
+    let mut tun = json!({
+        "enable": true,
+        "stack": "gvisor",
+        "auto-route": true,
+        "auto-detect-interface": true,
+        "strict-route": true,
+        "dns-hijack": ["any:53", "tcp://any:53"],
+    });
+    if layout.os == Os::Windows {
+        tun["device"] = json!(layout.tun_device);
+    }
+    tun
+}
+
+/// macOS: ядро-страж Kill Switch. Пока TUN не держит основное ядро (VPN выключен или включён режим
+/// «Системный прокси»), страж забирает трафик в адаптер и не выпускает программы из Kill Switch,
+/// остальное отпускает напрямую. Своего DNS у стража нет: имена по-прежнему спрашивает система,
+/// поэтому страж не трогает настройки DNS и не меняет, куда ходят остальные программы.
+/// На Windows то же делают постоянные фильтры WFP, и страж не нужен.
+pub fn compile_guard(settings: &Settings, layout: &CoreLayout) -> Value {
+    let mut rules = lan_rules();
+    if settings.kill_switch.enabled {
+        for p in settings.kill_switch.programs.iter().filter(|p| p.enabled) {
+            rules.push(format!("PROCESS-PATH-REGEX,{},REJECT", folder_regex(layout.os, &p.folder)));
+        }
+    }
+    rules.push("MATCH,DIRECT".into());
+    json!({
+        "mode": "rule",
+        "log-level": layout.log_level,
+        "ipv6": true,
+        "find-process-mode": "always",
+        "geo-auto-update": false,
+        "geodata-mode": false,
+        controller_key(layout.os): layout.controller,
+        "secret": layout.secret,
+        "profile": { "store-selected": false, "store-fake-ip": false },
+        "dns": { "enable": false },
+        "tun": {
+            "enable": true,
+            "stack": "gvisor",
+            "auto-route": true,
+            "auto-detect-interface": true,
+        },
+        "rules": rules,
+    })
+}
+
+fn controller_key(os: Os) -> &'static str {
+    match os {
+        Os::Windows => "external-controller-pipe",
+        Os::MacOs => "external-controller-unix",
+    }
 }
 
 /// Проверочное ядро: только серверы и управление, без портов и перехвата.
@@ -117,7 +168,7 @@ fn base(layout: &CoreLayout, provider_path: &str) -> Map<String, Value> {
         "find-process-mode": "always",
         "geo-auto-update": false,
         "geodata-mode": false,
-        "external-controller-pipe": layout.controller_pipe,
+        controller_key(layout.os): layout.controller,
         "secret": layout.secret,
         "profile": { "store-selected": false, "store-fake-ip": true },
         "proxy-providers": {
@@ -157,10 +208,17 @@ fn policy(route: Route) -> &'static str {
 }
 
 /// Регулярное выражение для всех файлов внутри папки программы.
-/// Запятая разделяет части правила mihomo, поэтому она кодируется как `\x2c`.
+pub fn folder_regex(os: Os, folder: &str) -> String {
+    match os {
+        Os::Windows => windows_folder_regex(folder),
+        Os::MacOs => crate::macos::folder_regex(folder),
+    }
+}
+
+/// Windows. Запятая разделяет части правила mihomo, поэтому она кодируется как `\x2c`.
 /// У программ из Microsoft Store версия зашита в имя папки пакета
 /// (`Claude_2.9939.2.0_x64__pzs8sxrjxfjjc`): её заменяем шаблоном, чтобы правило пережило обновление.
-pub fn folder_regex(folder: &str) -> String {
+fn windows_folder_regex(folder: &str) -> String {
     let mut re = String::from("(?i)^");
     for (i, segment) in folder.trim_end_matches('\\').split('\\').enumerate() {
         if i > 0 {
@@ -179,7 +237,7 @@ pub fn folder_regex(folder: &str) -> String {
     re
 }
 
-fn push_escaped(re: &mut String, text: &str) {
+pub(crate) fn push_escaped(re: &mut String, text: &str) {
     for ch in text.chars() {
         match ch {
             '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$' => {
@@ -222,19 +280,24 @@ const LAN_V4: [&str; 8] = [
 ];
 const LAN_V6: [&str; 4] = ["::1/128", "fc00::/7", "fe80::/10", "ff00::/8"];
 
-pub fn rules(s: &Settings, catalog: &Catalog) -> Vec<String> {
+/// Локальная сеть и сам компьютер — всегда напрямую.
+fn lan_rules() -> Vec<String> {
     let mut out = Vec::new();
-
     for cidr in LAN_V4.iter().chain(LAN_V6.iter()) {
         out.push(ip_rule(cidr, "DIRECT"));
     }
     for zone in ["local", "lan", "localhost"] {
         out.push(format!("DOMAIN-SUFFIX,{zone},DIRECT"));
     }
+    out
+}
+
+pub fn rules(s: &Settings, catalog: &Catalog, os: Os) -> Vec<String> {
+    let mut out = lan_rules();
 
     if s.kill_switch.enabled {
         for p in s.kill_switch.programs.iter().filter(|p| p.enabled) {
-            out.push(format!("PROCESS-PATH-REGEX,{},{VPN_GROUP}", folder_regex(&p.folder)));
+            out.push(format!("PROCESS-PATH-REGEX,{},{VPN_GROUP}", folder_regex(os, &p.folder)));
         }
     }
 
@@ -249,9 +312,9 @@ pub fn rules(s: &Settings, catalog: &Catalog) -> Vec<String> {
             _ => None,
         })
         .collect();
-    programs.sort_by_key(|(folder, _)| std::cmp::Reverse(folder.trim_end_matches('\\').split('\\').count()));
+    programs.sort_by_key(|(folder, _)| std::cmp::Reverse(os.depth(folder)));
     for (folder, route) in programs {
-        out.push(format!("PROCESS-PATH-REGEX,{},{}", folder_regex(folder), policy(route)));
+        out.push(format!("PROCESS-PATH-REGEX,{},{}", folder_regex(os, folder), policy(route)));
     }
     let (mut domains, mut ips) = (Vec::new(), Vec::new());
     for rule in &list {
@@ -323,7 +386,7 @@ fn vpn_domains(s: &Settings, catalog: &Catalog) -> Vec<String> {
     out
 }
 
-fn dns(s: &Settings, catalog: &Catalog) -> Value {
+fn dns(s: &Settings, catalog: &Catalog, os: Os) -> Value {
     let foreign: Vec<String> = DNS_FOREIGN.iter().map(|u| format!("{u}#{VPN_GROUP}")).collect();
     let ru: Vec<String> = DNS_RU.iter().map(|u| u.to_string()).collect();
     let mut policy = Map::new();
@@ -344,17 +407,22 @@ fn dns(s: &Settings, catalog: &Catalog) -> Value {
             foreign
         }
     };
+    let mut fake_ip_filter = vec![
+        "*.lan", "*.local", "*.localdomain", "localhost",
+        "+.msftconnecttest.com", "+.msftncsi.com",
+        "time.windows.com", "time.nist.gov", "+.pool.ntp.org", "+.time.edu.cn",
+        "+.stun.*.*", "+.stun.*.*.*", "stun.l.google.com",
+    ];
+    if os == Os::MacOs {
+        // Проверка «есть ли интернет» и страницы входа в сетях Wi-Fi, время системы.
+        fake_ip_filter.extend(["captive.apple.com", "+.captive.apple.com", "time.apple.com", "+.time.apple.com"]);
+    }
     json!({
         "enable": true,
         "ipv6": false,
         "enhanced-mode": "fake-ip",
         "fake-ip-range": "198.18.0.1/16",
-        "fake-ip-filter": [
-            "*.lan", "*.local", "*.localdomain", "localhost",
-            "+.msftconnecttest.com", "+.msftncsi.com",
-            "time.windows.com", "time.nist.gov", "+.pool.ntp.org", "+.time.edu.cn",
-            "+.stun.*.*", "+.stun.*.*.*", "stun.l.google.com"
-        ],
+        "fake-ip-filter": fake_ip_filter,
         "default-nameserver": ["77.88.8.8", "1.1.1.1"],
         "nameserver": nameserver,
         "nameserver-policy": policy,
@@ -381,11 +449,12 @@ fn sniffer() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Rule, Service};
+    use crate::model::{KsProgram, Rule, Service};
 
     fn layout() -> CoreLayout {
         CoreLayout {
-            controller_pipe: r"\\.\pipe\klick-core".into(),
+            os: Os::Windows,
+            controller: r"\\.\pipe\klick-core".into(),
             secret: "s".into(),
             mixed_port: 7890,
             check_vpn_port: 17891,
@@ -421,16 +490,16 @@ mod tests {
     #[test]
     fn folder_regex_survives_store_updates() {
         assert_eq!(
-            folder_regex(r"C:\Program Files\WindowsApps\Claude_2.9939.2.0_x64__pzs8sxrjxfjjc\app"),
+            folder_regex(Os::Windows, r"C:\Program Files\WindowsApps\Claude_2.9939.2.0_x64__pzs8sxrjxfjjc\app"),
             r"(?i)^C:\\Program Files\\WindowsApps\\Claude_[^\\]+__pzs8sxrjxfjjc\\app\\.+$"
         );
-        assert_eq!(folder_regex(r"C:\Games\My_Game_1.0_final"), r"(?i)^C:\\Games\\My_Game_1\.0_final\\.+$");
+        assert_eq!(folder_regex(Os::Windows, r"C:\Games\My_Game_1.0_final"), r"(?i)^C:\\Games\\My_Game_1\.0_final\\.+$");
     }
 
     #[test]
     fn folder_regex_escapes_windows_paths() {
         assert_eq!(
-            folder_regex(r"C:\Program Files (x86)\Game, Inc"),
+            folder_regex(Os::Windows, r"C:\Program Files (x86)\Game, Inc"),
             r"(?i)^C:\\Program Files \(x86\)\\Game\x2c Inc\\.+$"
         );
     }
@@ -444,7 +513,7 @@ mod tests {
             Rule { target: Target::Program(r"C:\Apps\Discord".into()), route: Route::Direct, enabled: true },
             Rule { target: Target::Domain("claude.ai".into()), route: Route::Vpn, enabled: true },
         ];
-        let r = rules(&s, &catalog());
+        let r = rules(&s, &catalog(), Os::Windows);
         let lan = position(&r, "192.168.0.0/16");
         let ks = position(&r, "Roblox");
         let program = position(&r, "Discord");
@@ -471,7 +540,7 @@ mod tests {
             Rule { target: Target::Ip("149.154.160.0/22".into()), route: Route::Direct, enabled: true },
             Rule { target: Target::Program(r"C:\Games\Roblox".into()), route: Route::Vpn, enabled: true },
         ];
-        let r = rules(&s, &catalog());
+        let r = rules(&s, &catalog(), Os::Windows);
         assert!(position(&r, "Games\\\\Roblox") < position(&r, "Games\\\\.+"), "вложенная папка раньше общей");
         assert!(position(&r, "DOMAIN-SUFFIX,kinopoisk.ru") < position(&r, "DOMAIN-SUFFIX,ru,"), "сайт раньше зоны");
         assert_eq!(r[position(&r, "DOMAIN-SUFFIX,telegram.org")], "DOMAIN-SUFFIX,telegram.org,REJECT", "свой сайт раньше сервиса");
@@ -484,7 +553,7 @@ mod tests {
         s.routing = Routing::AllVpn;
         s.lists.selected.push(Rule { target: Target::Domain("youtube.com".into()), route: Route::Vpn, enabled: true });
         s.lists.all_vpn.push(Rule { target: Target::Domain("sber.ru".into()), route: Route::Direct, enabled: true });
-        let r = rules(&s, &catalog());
+        let r = rules(&s, &catalog(), Os::Windows);
         assert!(r.iter().any(|x| x == "DOMAIN-SUFFIX,sber.ru,DIRECT"));
         assert!(!r.iter().any(|x| x.contains("youtube.com")), "список другого положения не действует");
         let n = r.len();
@@ -498,14 +567,14 @@ mod tests {
         let mut s = Settings::default();
         s.routing = Routing::AllVpn;
         s.russia_direct.domains = false;
-        let r = rules(&s, &catalog());
+        let r = rules(&s, &catalog(), Os::Windows);
         assert!(!r.iter().any(|x| x.contains(SET_RU_DOMAINS)));
         assert!(r.contains(&"GEOIP,RU,DIRECT".to_string()));
         assert_eq!(rule_providers(&s, &sets()), json!({}));
-        assert!(dns(&s, &catalog())["nameserver-policy"].as_object().unwrap().is_empty());
+        assert!(dns(&s, &catalog(), Os::Windows)["nameserver-policy"].as_object().unwrap().is_empty());
 
         s.russia_direct.ips = false;
-        let r = rules(&s, &catalog());
+        let r = rules(&s, &catalog(), Os::Windows);
         assert!(!r.iter().any(|x| x.starts_with("GEOIP")));
         assert!(r.iter().any(|x| x == "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve"), "локальная сеть напрямую всегда");
         assert_eq!(r.last().unwrap(), "MATCH,klick-vpn");
@@ -516,10 +585,10 @@ mod tests {
         let mut s = Settings::default();
         s.kill_switch.enabled = false;
         s.kill_switch.programs.push(r"C:\Games\Roblox".into());
-        assert!(!rules(&s, &catalog()).iter().any(|r| r.contains("Roblox")));
+        assert!(!rules(&s, &catalog(), Os::Windows).iter().any(|r| r.contains("Roblox")));
         s.kill_switch.enabled = true;
         s.kill_switch.programs[0].enabled = false;
-        assert!(!rules(&s, &catalog()).iter().any(|r| r.contains("Roblox")), "выключенная программа не защищается");
+        assert!(!rules(&s, &catalog(), Os::Windows).iter().any(|r| r.contains("Roblox")), "выключенная программа не защищается");
     }
 
     #[test]
@@ -541,7 +610,7 @@ mod tests {
     fn dns_asks_blocked_names_through_vpn() {
         let mut s = Settings::default();
         s.lists.selected.push(Rule { target: Target::Domain("claude.ai".into()), route: Route::Vpn, enabled: true });
-        let d = dns(&s, &catalog());
+        let d = dns(&s, &catalog(), Os::Windows);
         assert_eq!(d["nameserver"][0], "https://77.88.8.8/dns-query");
         assert_eq!(d["nameserver-policy"]["+.claude.ai"][0], "https://1.1.1.1/dns-query#klick-vpn");
         assert!(d["nameserver-policy"][format!("rule-set:{SET_BLOCKED_DOMAINS}")].is_array());
@@ -552,17 +621,17 @@ mod tests {
         let mut s = Settings::default();
         s.lists.selected.push(Rule { target: Target::Domain("claude.ai".into()), route: Route::Vpn, enabled: false });
         s.lists.selected.push(Rule { target: Target::Domain("chatgpt.com".into()), route: Route::Vpn, enabled: true });
-        let r = rules(&s, &catalog());
+        let r = rules(&s, &catalog(), Os::Windows);
         assert!(!r.iter().any(|x| x.contains("claude.ai")), "выключенное правило не работает");
         assert!(r.iter().any(|x| x == "DOMAIN-SUFFIX,chatgpt.com,klick-vpn"));
-        assert!(dns(&s, &catalog())["nameserver-policy"].get("+.claude.ai").is_none());
+        assert!(dns(&s, &catalog(), Os::Windows)["nameserver-policy"].get("+.claude.ai").is_none());
 
         s.blocked_preset = false;
-        let r = rules(&s, &catalog());
+        let r = rules(&s, &catalog(), Os::Windows);
         assert!(!r.iter().any(|x| x.contains(SET_BLOCKED_DOMAINS) || x.contains(SET_BLOCKED_IPS)));
         assert_eq!(r.last().unwrap(), "MATCH,DIRECT");
         assert_eq!(rule_providers(&s, &sets()), json!({}));
-        assert!(dns(&s, &catalog())["nameserver-policy"].get(format!("rule-set:{SET_BLOCKED_DOMAINS}")).is_none());
+        assert!(dns(&s, &catalog(), Os::Windows)["nameserver-policy"].get(format!("rule-set:{SET_BLOCKED_DOMAINS}")).is_none());
     }
 
     #[test]
@@ -579,5 +648,59 @@ mod tests {
         assert!(t.get("tun").is_none());
         assert!(t.get("listeners").is_none());
         assert_eq!(t["external-controller-pipe"], r"\\.\pipe\klick-core");
+    }
+
+    fn mac_layout() -> CoreLayout {
+        CoreLayout { os: Os::MacOs, controller: "/Library/Application Support/klick/run/core.sock".into(), ..layout() }
+    }
+
+    #[test]
+    fn macos_config_uses_unix_socket_and_system_tun_name() {
+        let s = Settings::default();
+        let (c, l, st) = (catalog(), mac_layout(), sets());
+        let cfg = compile(&CompileInput { settings: &s, catalog: &c, layout: &l, capture: Capture::Tun, provider_path: "providers/a.txt", sets: &st });
+        assert_eq!(cfg["external-controller-unix"], "/Library/Application Support/klick/run/core.sock");
+        assert!(cfg.get("external-controller-pipe").is_none());
+        assert!(cfg["tun"].get("device").is_none(), "на macOS имя utunN выбирает ядро");
+        assert_eq!(cfg["tun"]["auto-route"], true);
+        let filter = cfg["dns"]["fake-ip-filter"].as_array().unwrap();
+        assert!(filter.iter().any(|f| f == "captive.apple.com"));
+        let windows = compile(&CompileInput { settings: &s, catalog: &c, layout: &layout(), capture: Capture::Tun, provider_path: "providers/a.txt", sets: &st });
+        assert!(!windows["dns"]["fake-ip-filter"].as_array().unwrap().iter().any(|f| f == "captive.apple.com"));
+        assert_eq!(windows["tun"]["device"], "klick");
+    }
+
+    #[test]
+    fn macos_rules_use_bundle_paths() {
+        let mut s = Settings::default();
+        s.kill_switch.programs.push("/Applications/Telegram.app".into());
+        s.lists.selected = vec![
+            Rule { target: Target::Program("/Users/a/Games".into()), route: Route::Direct, enabled: true },
+            Rule { target: Target::Program("/Users/a/Games/Roblox.app".into()), route: Route::Vpn, enabled: true },
+        ];
+        let r = rules(&s, &catalog(), Os::MacOs);
+        assert!(r.contains(&r"PROCESS-PATH-REGEX,(?i)^/Applications/Telegram\.app/.+$,klick-vpn".to_string()));
+        assert!(position(&r, "Roblox") < position(&r, "Games/.+"), "вложенная папка раньше общей");
+    }
+
+    #[test]
+    fn guard_blocks_only_kill_switch_programs() {
+        let mut s = Settings::default();
+        s.kill_switch.programs.push("/Applications/Telegram.app".into());
+        s.kill_switch.programs.push(KsProgram { folder: "/Applications/Discord.app".into(), enabled: false });
+        let g = compile_guard(&s, &mac_layout());
+        let rules: Vec<&str> = g["rules"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+        assert!(rules.contains(&r"PROCESS-PATH-REGEX,(?i)^/Applications/Telegram\.app/.+$,REJECT"));
+        assert!(!rules.iter().any(|r| r.contains("Discord")), "выключенная программа не блокируется");
+        assert!(rules.iter().position(|r| r.contains("192.168.0.0/16")) < rules.iter().position(|r| r.contains("Telegram")), "локальная сеть можно");
+        assert_eq!(rules.last(), Some(&"MATCH,DIRECT"));
+        assert_eq!(g["dns"]["enable"], false, "страж не трогает DNS");
+        assert!(g["tun"].get("dns-hijack").is_none());
+        assert!(g.get("proxy-providers").is_none() && g.get("mixed-port").is_none());
+        assert_eq!(g["external-controller-unix"], "/Library/Application Support/klick/run/core.sock");
+
+        s.kill_switch.enabled = false;
+        let off = compile_guard(&s, &mac_layout());
+        assert!(!off["rules"].as_array().unwrap().iter().any(|r| r.as_str().unwrap().contains("REJECT")));
     }
 }

@@ -3,21 +3,26 @@
 
 use crate::core::{random_secret, CoreApi, CoreProcess};
 use crate::ipcheck::{self, Plan};
-use crate::killswitch::{self, Wfp};
+use crate::killswitch;
+#[cfg(windows)]
+use crate::killswitch::Wfp;
 use crate::logring;
 use crate::neighbors;
+#[cfg(unix)]
+use crate::netconf;
 use crate::netwatch::NetWatch;
 use crate::paths::{Paths, Profile};
 use crate::programs;
 use crate::storage::{self, Secrets};
 use crate::subs;
+use crate::sys;
+#[cfg(windows)]
 use crate::userproxy;
-use crate::win;
 use klick_core::compile::{self, Capture, CompileInput, CoreLayout, SetFiles, PROBE_URL, PROVIDER, VPN_GROUP};
 use klick_core::guard::{Action, Guard, Health, Notice};
 use klick_core::sub::{self as subparse, Content, SourceKind};
 use klick_core::{
-    normalize_cidr, normalize_domain, program_folder, Catalog, Connection, ConnectionKind, KsProgram, Mode, Routing, Rule,
+    normalize_cidr, normalize_domain, program_folder_on, Catalog, Connection, ConnectionKind, InputError, KsProgram, Mode, Os, Routing, Rule,
     ServerDownPolicy, Settings, Target,
 };
 use klick_proto::{
@@ -41,6 +46,9 @@ pub enum Msg {
     /// Windows сообщила об изменении сети (после сна, смены Wi-Fi, отключения кабеля).
     NetworkChanged,
     CoreExited { generation: u64, code: Option<i32> },
+    /// macOS: ядро-страж Kill Switch завершилось само.
+    #[cfg(unix)]
+    KsCoreExited { generation: u64 },
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -90,6 +98,17 @@ impl Running {
     }
 }
 
+/// macOS: работающее ядро-страж Kill Switch.
+#[cfg(unix)]
+struct KsCore {
+    process: CoreProcess,
+    generation: u64,
+    layout: CoreLayout,
+    /// Какие папки программ оно закрывает.
+    folders: Vec<String>,
+    started: Instant,
+}
+
 /// Последние неудачные соединения для «Не открывается?». Только в памяти.
 type Failures = Arc<Mutex<VecDeque<FailureView>>>;
 const FAILURES_KEPT: usize = 50;
@@ -110,7 +129,19 @@ pub struct Engine {
     restarts: u8,
     proxy_applied: bool,
     /// Прокси поставила служба, потому что окна не было: что стояло у пользователя до этого.
+    #[cfg(windows)]
     user_proxy_saved: Option<userproxy::Saved>,
+    /// macOS: ядро-страж Kill Switch — держит TUN, пока его не держит основное ядро.
+    #[cfg(unix)]
+    ks_core: Option<KsCore>,
+    #[cfg(unix)]
+    ks_generation: u64,
+    /// macOS: сколько раз подряд страж падал; после трёх — уведомление, без бесконечных перезапусков.
+    #[cfg(unix)]
+    ks_failures: u8,
+    /// macOS: DNS сетевых служб подменён на адрес внутри адаптера (режим VPN).
+    #[cfg(unix)]
+    dns_overridden: bool,
     servers: HashMap<String, Vec<ServerView>>,
     failures: Failures,
     /// Следующая плановая работа: обновление подписок, предупреждения о сроке и трафике.
@@ -137,9 +168,22 @@ struct Runtime {
     boot: i64,
 }
 
+#[cfg(windows)]
 fn boot_time() -> i64 {
     let uptime = unsafe { windows::Win32::System::SystemInformation::GetTickCount64() } / 1000;
     unix_now() - uptime as i64
+}
+
+#[cfg(unix)]
+fn boot_time() -> i64 {
+    sys::boot_time()
+}
+
+/// Папка программы из пути: служба видит диск и подсказывает, файл это или папка —
+/// на macOS у программы без пакета `.app` нет расширения, по которому её узнать.
+fn program_folder(input: &str) -> Result<String, InputError> {
+    let is_file = Path::new(input.trim().trim_matches('"')).is_file();
+    program_folder_on(Os::CURRENT, input, Some(is_file))
 }
 
 fn read_runtime(paths: &Paths) -> Option<Runtime> {
@@ -160,8 +204,10 @@ fn was_on_before_reboot(paths: &Paths) -> bool {
 pub fn spawn(paths: Paths, profile: Profile) -> anyhow::Result<(EngineHandle, tokio::task::JoinHandle<()>)> {
     paths.ensure_dirs()?;
     if !profile.dev {
-        win::restrict_to_admins(&paths.data)?;
+        sys::restrict_to_admins(&paths.data)?;
     }
+    #[cfg(unix)]
+    sys::private_dir(&profile.run_dir())?;
     storage::install_core_files(&paths)?;
     let settings = storage::load_settings(&paths);
     let secrets = Secrets::load(&paths);
@@ -210,7 +256,16 @@ pub fn spawn(paths: Paths, profile: Profile) -> anyhow::Result<(EngineHandle, to
         epoch: Instant::now(),
         restarts: 0,
         proxy_applied: false,
+        #[cfg(windows)]
         user_proxy_saved: None,
+        #[cfg(unix)]
+        ks_core: None,
+        #[cfg(unix)]
+        ks_generation: 0,
+        #[cfg(unix)]
+        ks_failures: 0,
+        #[cfg(unix)]
+        dns_overridden: false,
         servers: HashMap::new(),
         failures: Arc::new(Mutex::new(VecDeque::with_capacity(FAILURES_KEPT))),
         next_maintenance: Instant::now() + Duration::from_secs(60),
@@ -234,9 +289,15 @@ fn code_name<T: serde::Serialize>(v: &T) -> String {
 
 /// Версия ядра из `mihomo -v`: «Mihomo Meta v1.19.31 windows amd64 …» → «v1.19.31».
 fn core_version(exe: &Path) -> Option<String> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let out = std::process::Command::new(exe).arg("-v").creation_flags(CREATE_NO_WINDOW).output().ok()?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("-v");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd.output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     text.split_whitespace().find(|w| w.len() > 1 && w.starts_with('v') && w[1..].starts_with(|c: char| c.is_ascii_digit())).map(str::to_string)
 }
@@ -288,9 +349,24 @@ pub fn unix_now() -> i64 {
 
 impl Engine {
     async fn run(mut self, mut rx: mpsc::Receiver<Msg>) {
-        self.apply_killswitch();
+        self.apply_killswitch().await;
+        // macOS: служба перезапустилась (сбой, обновление, перезагрузка), а прокси и DNS остались
+        // такими, какими их ставил kl!ck, — вернуть. Если VPN надо восстановить, он поставит их заново.
+        #[cfg(unix)]
+        if self.netconf_allowed() {
+            let data = self.paths.data.clone();
+            let (proxy, dns) = tokio::task::spawn_blocking(move || netconf::restore_leftovers(&data)).await.unwrap_or((false, false));
+            if proxy {
+                tracing::info!("снят оставшийся системный прокси kl!ck");
+            }
+            if dns {
+                tracing::info!("возвращён DNS, который стоял до VPN");
+            }
+        }
         // Служба перезапустилась, а у пользователя остался прокси, который ставила она, — снять.
+        #[cfg(windows)]
         let marker = self.paths.data.join("user-proxy.json");
+        #[cfg(windows)]
         if let Some(saved) = std::fs::read(&marker).ok().and_then(|b| serde_json::from_slice::<userproxy::Saved>(&b).ok()) {
             if self.restore_pending {
                 self.user_proxy_saved = Some(saved);
@@ -325,6 +401,8 @@ impl Engine {
                         }
                         Msg::NetworkChanged => self.on_network_change().await,
                         Msg::CoreExited { generation, code } => self.on_core_exit(generation, code).await,
+                        #[cfg(unix)]
+                        Msg::KsCoreExited { generation } => self.on_ks_core_exit(generation).await,
                         Msg::Shutdown(done) => {
                             self.shutdown().await;
                             let _ = done.send(());
@@ -497,7 +575,7 @@ impl Engine {
     /// заметить, что программа из Kill Switch обновилась в новую папку или пропала.
     async fn maintenance(&mut self) {
         self.next_maintenance = Instant::now() + Duration::from_secs(600);
-        self.check_killswitch_programs();
+        self.check_killswitch_programs().await;
         let now = unix_now();
         let due: Vec<String> = self
             .settings
@@ -540,6 +618,9 @@ impl Engine {
 
     /// После сна, смены Wi-Fi или кабеля: сразу проверить связь, а не ждать плановой проверки.
     async fn on_network_change(&mut self) {
+        // macOS: появилась новая сетевая служба (USB-модем, другой адаптер) — ей тоже прокси и DNS.
+        #[cfg(unix)]
+        self.refresh_netconf().await;
         let Some(started) = self.running.as_ref().map(|r| r.started) else { return };
         if started.elapsed() < Duration::from_secs(10) {
             return;
@@ -661,7 +742,7 @@ impl Engine {
             core_version: self.core_version.clone(),
             mixed_port: self.profile.mixed_port,
             data_dir: self.paths.data.display().to_string(),
-            os: win::os_name(),
+            os: sys::os_name(),
             dev: self.profile.dev,
         }
     }
@@ -723,11 +804,11 @@ impl Engine {
     }
 
     fn proxy_spec(&self) -> SystemProxy {
-        SystemProxy {
-            host: "127.0.0.1".into(),
-            port: self.profile.mixed_port,
-            bypass: vec!["localhost".into(), "127.*".into(), "10.*".into(), "172.16.*".into(), "192.168.*".into(), "<local>".into()],
-        }
+        #[cfg(windows)]
+        let bypass = vec!["localhost".into(), "127.*".into(), "10.*".into(), "172.16.*".into(), "192.168.*".into(), "<local>".into()];
+        #[cfg(unix)]
+        let bypass = netconf::BYPASS.iter().map(|s| s.to_string()).collect();
+        SystemProxy { host: "127.0.0.1".into(), port: self.profile.mixed_port, bypass }
     }
 
     fn view_json(&self) -> Value {
@@ -836,19 +917,19 @@ impl Engine {
     }
 
     async fn disconnect(&mut self) {
-        self.clear_proxy();
+        self.clear_proxy().await;
         self.stop_core().await;
         self.guard = None;
         self.since = None;
         self.restarts = 0;
-        self.apply_killswitch();
+        self.apply_killswitch().await;
         self.set_state(VpnState::Off, None);
         self.save_runtime(false);
     }
 
     /// Новый режим или другое подключение: ядро перезапускается с новым конфигом.
     async fn reconnect(&mut self) -> Result<(), ErrorInfo> {
-        self.clear_proxy();
+        self.clear_proxy().await;
         self.stop_core().await;
         self.guard = None;
         self.connect().await
@@ -856,12 +937,18 @@ impl Engine {
 
     async fn start_core(&mut self, capture: Capture) -> Result<(), ErrorInfo> {
         let conn_id = self.settings.active_connection.clone().ok_or_else(|| ErrorInfo::new("vpn.no_connection"))?;
+        // macOS: адаптер TUN на системе один — страж Kill Switch уступает его основному ядру.
+        #[cfg(unix)]
+        if capture == Capture::Tun {
+            self.stop_ks_core().await;
+        }
         let layout = CoreLayout {
-            controller_pipe: self.profile.core_pipe.clone(),
+            os: Os::CURRENT,
+            controller: self.profile.core_pipe.clone(),
             secret: random_secret(),
             mixed_port: self.profile.mixed_port,
-            check_vpn_port: win::free_port().map_err(internal)?,
-            check_direct_port: win::free_port().map_err(internal)?,
+            check_vpn_port: sys::free_port().map_err(internal)?,
+            check_direct_port: sys::free_port().map_err(internal)?,
             tun_device: TUN_DEVICE.into(),
             log_level: self.profile.core_log_level.clone(),
         };
@@ -869,7 +956,7 @@ impl Engine {
         self.generation += 1;
         let generation = self.generation;
         let tx = self.tx.clone();
-        let api = CoreApi::new(&layout.controller_pipe, &layout.secret);
+        let api = CoreApi::new(&layout.controller, &layout.secret);
         let process = CoreProcess::start(&self.paths.core_exe, &self.paths.core_home, &config_path, api.clone(), self.profile.dev, move |code| {
             let _ = tx.try_send(Msg::CoreExited { generation, code });
         })
@@ -923,20 +1010,29 @@ impl Engine {
         let Some(capture) = self.running.as_ref().map(|r| r.capture) else { return };
         if capture == Capture::Tun {
             let deadline = Instant::now() + Duration::from_secs(5);
-            while win::interface_luid(TUN_DEVICE).is_none() && Instant::now() < deadline {
+            while !sys::tun_up() && Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            if win::interface_luid(TUN_DEVICE).is_none() {
+            if !sys::tun_up() {
                 tracing::warn!("адаптер {TUN_DEVICE} не появился за 5 с");
             }
         }
         // В обоих режимах: после TUN в фильтрах осталось бы разрешение для пропавшего адаптера.
-        self.apply_killswitch();
+        // macOS: в режиме «Системный прокси» TUN свободен, и его забирает страж Kill Switch.
+        self.apply_killswitch().await;
+        #[cfg(unix)]
+        if capture == Capture::Tun {
+            self.set_dns_override(true).await;
+        }
         if self.settings.mode == Mode::SysProxy {
             let spec = self.proxy_spec();
             self.emit(Event::ProxyApply { host: spec.host.clone(), port: spec.port, bypass: spec.bypass.clone() });
             self.proxy_applied = true;
+            // macOS: настройки сети общие и меняются с правами администратора — прокси всегда ставит служба.
+            #[cfg(unix)]
+            self.netconf_proxy(Some(spec)).await;
             // Окна нет — прокси пользователю ставит служба.
+            #[cfg(windows)]
             if self.events.receiver_count() == 0 && self.user_proxy_saved.is_none() {
                 self.user_proxy_saved = userproxy::apply(&spec);
                 if let Some(saved) = &self.user_proxy_saved {
@@ -949,10 +1045,13 @@ impl Engine {
         }
     }
 
-    fn clear_proxy(&mut self) {
+    async fn clear_proxy(&mut self) {
         if self.proxy_applied {
             self.emit(Event::ProxyClear);
             self.proxy_applied = false;
+            #[cfg(unix)]
+            self.netconf_proxy(None).await;
+            #[cfg(windows)]
             if let Some(saved) = self.user_proxy_saved.take() {
                 if userproxy::clear(self.profile.mixed_port, Some(saved)) {
                     tracing::info!("системный прокси пользователя сняла служба");
@@ -963,6 +1062,9 @@ impl Engine {
     }
 
     async fn stop_core(&mut self) {
+        // macOS: DNS вернуть до остановки ядра — пока ядро живо, запросы к подменному адресу ещё отвечаются.
+        #[cfg(unix)]
+        self.set_dns_override(false).await;
         if let Some(r) = self.running.take() {
             r.abort_tasks();
             r.process.stop().await;
@@ -1126,17 +1228,21 @@ impl Engine {
                 return;
             }
         }
-        self.clear_proxy();
+        self.clear_proxy().await;
         self.guard = None;
         self.since = None;
-        self.apply_killswitch();
+        #[cfg(unix)]
+        self.set_dns_override(false).await;
+        self.apply_killswitch().await;
         self.set_state(VpnState::Error, Some("core.crashed".into()));
         self.notice("vpn.core_crashed", Value::Null);
     }
 
     async fn shutdown(&mut self) {
-        self.clear_proxy();
+        self.clear_proxy().await;
         self.stop_core().await;
+        #[cfg(unix)]
+        self.stop_ks_core().await;
     }
 
     // ── Kill Switch ────────────────────────────────────────────────────────
@@ -1150,14 +1256,22 @@ impl Engine {
         ks.programs.iter().filter(|p| p.enabled).map(|p| (p.folder.clone(), killswitch::scan_folder(Path::new(&p.folder)))).collect()
     }
 
-    fn apply_killswitch(&mut self) {
+    async fn apply_killswitch(&mut self) {
         if !self.profile.wfp_allowed {
             return;
         }
         let exes: Vec<PathBuf> = self.ks_scan().into_iter().flat_map(|(_, e)| e).collect();
         self.ks_applied = exes.clone();
-        let tun = self.running.as_ref().filter(|r| r.capture == Capture::Tun).and_then(|_| win::interface_luid(TUN_DEVICE));
-        match Wfp::open().and_then(|w| w.apply(&exes, tun)) {
+        #[cfg(unix)]
+        self.sync_ks_core().await;
+        #[cfg(windows)]
+        self.apply_wfp(&exes);
+    }
+
+    #[cfg(windows)]
+    fn apply_wfp(&mut self, exes: &[PathBuf]) {
+        let tun = self.running.as_ref().filter(|r| r.capture == Capture::Tun).and_then(|_| crate::win::interface_luid(TUN_DEVICE));
+        match Wfp::open().and_then(|w| w.apply(exes, tun)) {
             Ok(r) => {
                 tracing::info!("Kill Switch: защищено exe {}, снято старых фильтров {}, адаптер {}", r.protected, r.removed, if tun.is_some() { "есть" } else { "нет" });
                 if !r.failed.is_empty() {
@@ -1172,7 +1286,7 @@ impl Engine {
     }
 
     /// Новые exe в папке программы (обновилась) — закрыть и их; папка пуста — предупредить один раз.
-    fn check_killswitch_programs(&mut self) {
+    async fn check_killswitch_programs(&mut self) {
         let scan = self.ks_scan();
         let mut missing = Vec::new();
         for (folder, exes) in &scan {
@@ -1191,16 +1305,192 @@ impl Engine {
         let exes: Vec<PathBuf> = scan.into_iter().flat_map(|(_, e)| e).collect();
         if self.profile.wfp_allowed && exes != self.ks_applied {
             tracing::info!("Kill Switch: состав exe изменился, применяю заново");
-            self.apply_killswitch();
+            self.apply_killswitch().await;
         }
     }
 
     async fn killswitch_changed(&mut self) -> Result<Value, ErrorInfo> {
         self.save()?;
-        self.apply_killswitch();
+        self.apply_killswitch().await;
         self.reload_rules().await;
         self.emit_state();
         serde_json::to_value(&self.settings.kill_switch).map_err(internal)
+    }
+
+    // ── macOS: системный прокси, DNS и страж Kill Switch ───────────────────
+
+    /// Трогать настройки сети можно рабочей службе и службе для разработки, запущенной через sudo.
+    #[cfg(unix)]
+    fn netconf_allowed(&self) -> bool {
+        !self.profile.dev || sys::is_elevated()
+    }
+
+    /// Поставить (`Some`) или снять (`None`) системный прокси всем сетевым службам Mac.
+    #[cfg(unix)]
+    async fn netconf_proxy(&self, spec: Option<SystemProxy>) {
+        if !self.netconf_allowed() {
+            return;
+        }
+        let marker = self.paths.data.join(netconf::PROXY_MARKER);
+        let on = spec.is_some();
+        let ok = tokio::task::spawn_blocking(move || match spec {
+            Some(s) => netconf::proxy_apply(&s, &marker),
+            None => netconf::proxy_clear(&marker),
+        })
+        .await
+        .unwrap_or(false);
+        match (on, ok) {
+            (true, true) => tracing::info!("системный прокси поставлен"),
+            (true, false) => tracing::warn!("системный прокси не поставился: нет сетевых служб"),
+            (false, true) => tracing::info!("системный прокси снят"),
+            (false, false) => {}
+        }
+    }
+
+    /// Режим VPN (TUN): DNS сетевых служб — на адрес внутри адаптера, иначе DNS из локальной сети
+    /// (роутер) спрашивается мимо VPN. При отключении — вернуть прежний.
+    #[cfg(unix)]
+    async fn set_dns_override(&mut self, on: bool) {
+        if on == self.dns_overridden || !self.netconf_allowed() {
+            return;
+        }
+        self.dns_overridden = on;
+        let marker = self.paths.data.join(netconf::DNS_MARKER);
+        let ok = tokio::task::spawn_blocking(move || if on { netconf::dns_apply(&marker) } else { netconf::dns_restore(&marker) })
+            .await
+            .unwrap_or(false);
+        match (on, ok) {
+            (true, true) => tracing::info!("DNS на время VPN: {}", netconf::DNS_ADDR),
+            (true, false) => tracing::warn!("DNS не подменился: нет сетевых служб"),
+            (false, true) => tracing::info!("DNS возвращён"),
+            (false, false) => {}
+        }
+    }
+
+    /// Сеть изменилась: новым сетевым службам — тот же прокси и DNS.
+    #[cfg(unix)]
+    async fn refresh_netconf(&mut self) {
+        if !self.netconf_allowed() {
+            return;
+        }
+        if self.proxy_applied {
+            self.netconf_proxy(Some(self.proxy_spec())).await;
+        }
+        if self.dns_overridden {
+            let marker = self.paths.data.join(netconf::DNS_MARKER);
+            let _ = tokio::task::spawn_blocking(move || netconf::dns_apply(&marker)).await;
+        }
+    }
+
+    /// Какие программы закрывает страж: включённые программы Kill Switch, которые есть на диске.
+    #[cfg(unix)]
+    fn ks_folders(&self) -> Vec<String> {
+        let ks = &self.settings.kill_switch;
+        if !ks.enabled {
+            return Vec::new();
+        }
+        ks.programs.iter().filter(|p| p.enabled && Path::new(&p.folder).exists()).map(|p| p.folder.clone()).collect()
+    }
+
+    /// Страж нужен, когда есть что закрывать, а TUN не держит основное ядро: VPN выключен
+    /// или включён в режиме «Системный прокси». Состав программ меняется без перезапуска стража.
+    #[cfg(unix)]
+    async fn sync_ks_core(&mut self) {
+        let main_tun = self.running.as_ref().is_some_and(|r| r.capture == Capture::Tun);
+        let folders = if main_tun { Vec::new() } else { self.ks_folders() };
+        if folders.is_empty() {
+            self.stop_ks_core().await;
+            return;
+        }
+        if let Some(k) = &self.ks_core {
+            if k.folders == folders {
+                return;
+            }
+            let (api, layout) = (k.process.api.clone(), k.layout.clone());
+            if let Ok(path) = self.write_guard_config(&layout, &folders) {
+                if api.reload(&path).await.is_ok() {
+                    tracing::info!("Kill Switch: страж закрывает программ {}", folders.len());
+                    if let Some(k) = self.ks_core.as_mut() {
+                        k.folders = folders;
+                    }
+                    return;
+                }
+            }
+            self.stop_ks_core().await;
+        }
+        match self.start_ks_core(folders).await {
+            Ok(n) => tracing::info!("Kill Switch: страж запущен, программ {n}"),
+            Err(e) => {
+                tracing::error!("Kill Switch: страж не запустился: {e:#}");
+                self.notice("killswitch.failed", Value::Null);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn write_guard_config(&self, layout: &CoreLayout, folders: &[String]) -> anyhow::Result<PathBuf> {
+        let mut settings = self.settings.clone();
+        settings.kill_switch.enabled = true;
+        settings.kill_switch.programs = folders.iter().map(|f| KsProgram { folder: f.clone(), enabled: true }).collect();
+        let cfg = compile::compile_guard(&settings, layout);
+        let home = self.paths.core_home.join("guard");
+        std::fs::create_dir_all(&home)?;
+        let path = home.join("config.yaml");
+        storage::write_atomic(&path, &serde_json::to_vec_pretty(&cfg)?)?;
+        Ok(path)
+    }
+
+    #[cfg(unix)]
+    async fn start_ks_core(&mut self, folders: Vec<String>) -> anyhow::Result<usize> {
+        let layout = CoreLayout {
+            os: Os::CURRENT,
+            controller: self.profile.guard_pipe.clone(),
+            secret: random_secret(),
+            mixed_port: 0,
+            check_vpn_port: 0,
+            check_direct_port: 0,
+            tun_device: TUN_DEVICE.into(),
+            log_level: self.profile.core_log_level.clone(),
+        };
+        let path = self.write_guard_config(&layout, &folders)?;
+        let home = self.paths.core_home.join("guard");
+        self.ks_generation += 1;
+        let generation = self.ks_generation;
+        let tx = self.tx.clone();
+        let api = CoreApi::new(&layout.controller, &layout.secret);
+        let process = CoreProcess::start(&self.paths.core_exe, &home, &path, api, self.profile.dev, move |_| {
+            let _ = tx.try_send(Msg::KsCoreExited { generation });
+        })
+        .await?;
+        let n = folders.len();
+        self.ks_core = Some(KsCore { process, generation, layout, folders, started: Instant::now() });
+        Ok(n)
+    }
+
+    #[cfg(unix)]
+    async fn stop_ks_core(&mut self) {
+        if let Some(k) = self.ks_core.take() {
+            k.process.stop().await;
+            tracing::info!("Kill Switch: страж остановлен");
+        }
+    }
+
+    /// Страж упал сам: перезапустить; после трёх падений подряд — предупредить и не мучить систему.
+    #[cfg(unix)]
+    async fn on_ks_core_exit(&mut self, generation: u64) {
+        let Some(k) = self.ks_core.take_if(|k| k.generation == generation) else { return };
+        tracing::warn!("Kill Switch: страж завершился сам; последние строки: {}", k.process.tail().join(" | "));
+        if k.started.elapsed() > Duration::from_secs(60) {
+            self.ks_failures = 0;
+        }
+        drop(k);
+        self.ks_failures += 1;
+        if self.ks_failures > 3 {
+            tracing::error!("Kill Switch: страж падает раз за разом, больше не запускаю");
+            self.notice("killswitch.failed", Value::Null);
+            return;
+        }
+        self.sync_ks_core().await;
     }
 
     // ── Списки ─────────────────────────────────────────────────────────────
@@ -1427,7 +1717,8 @@ impl Engine {
 
     async fn tester(&self, conn_id: &str, measure: bool) -> Result<(Vec<(String, String)>, HashMap<String, u32>), ErrorInfo> {
         let layout = CoreLayout {
-            controller_pipe: self.profile.tester_pipe.clone(),
+            os: Os::CURRENT,
+            controller: self.profile.tester_pipe.clone(),
             secret: random_secret(),
             mixed_port: 0,
             check_vpn_port: 0,
@@ -1438,7 +1729,7 @@ impl Engine {
         let cfg = compile::compile_tester(&layout, &Paths::provider_rel(conn_id));
         let path = self.paths.core_home.join("tester.yaml");
         storage::write_atomic(&path, &serde_json::to_vec_pretty(&cfg).map_err(internal)?).map_err(internal)?;
-        let api = CoreApi::new(&layout.controller_pipe, &layout.secret);
+        let api = CoreApi::new(&layout.controller, &layout.secret);
         let process = CoreProcess::start(&self.paths.core_exe, &self.paths.core_home, &path, api.clone(), false, |_| {}).await.map_err(|e| {
             tracing::error!("проверочное ядро не запустилось: {e:#}");
             ErrorInfo::new("core.start_failed")
