@@ -2,6 +2,7 @@
 # тесты, конфиги ядра (mihomo -t) и сквозная проверка с установкой службы (scripts/macos/smoke-test.sh).
 # Запуск вручную (Actions → macOS → Run workflow) со ссылкой подписки проверяет ещё и настоящие серверы
 # (scripts/macos/real-test.sh). Ссылка не сохраняется в репозитории и скрыта в журнале.
+# С флажком «выпустить» после всех проверок пакет уходит в Releases (тег v<версия из Cargo.toml>).
 name: macOS
 
 # Правки только документации сборку на Mac не запускают.
@@ -16,6 +17,14 @@ on:
         description: Ссылка подписки для проверки с настоящими серверами (необязательно)
         required: false
         default: ''
+      release:
+        description: Выпустить — после всех проверок выложить пакет в Releases с тегом v<версия>
+        type: boolean
+        default: false
+
+# Выложить выпуск (только ручной запуск с флажком «выпустить»).
+permissions:
+  contents: write
 
 # Новый пуш ждёт, пока доработает текущая сборка, а не отменяет её (ждёт только самый свежий).
 concurrency:
@@ -52,6 +61,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Сборка kl!ck.app и .pkg (universal)
+        env:
+          # «Проверить обновления» в окне смотрит выпуски этого репозитория.
+          KLICK_RELEASES_REPO: ${{ github.repository }}
         run: scripts/macos/build.sh
 
       - name: Тесты
@@ -68,6 +80,12 @@ jobs:
         run: |
           sub="$(jq -r '.inputs.sub // empty' "$GITHUB_EVENT_PATH")"
           sudo /usr/bin/env "KLICK_TEST_SUB=$sub" scripts/macos/real-test.sh "dist/kl!ck.app"
+
+      - name: Выпуск в Releases
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/macos/publish-release.sh
 
       - name: Архив приложения
         if: always()

@@ -67,22 +67,4 @@ jobs:
       - name: Выпуск
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          ver="$VER"
-          cp "dist/klick-$ver.pkg" dist/klick-macos.pkg
-          cat > notes.md <<NOTES
-          kl!ck $ver для macOS 12+ (Apple Silicon и Intel).
-
-          Установка из Терминала (пакет не подписан сертификатом Apple, поэтому так проще, чем двойным щелчком):
-
-          \`\`\`sh
-          curl -fL -o /tmp/klick.pkg https://github.com/${{ github.repository }}/releases/download/$TAG/klick-macos.pkg
-          sudo installer -pkg /tmp/klick.pkg -target /
-          open -a 'kl!ck'
-          \`\`\`
-
-          Удаление: \`sudo '/Applications/kl!ck.app/Contents/Resources/uninstall.sh'\`
-          NOTES
-          # Тега ещё нет (ручной запуск) — gh ставит его на этот коммит.
-          gh release create "$TAG" "dist/klick-$ver.pkg" dist/klick-macos.pkg --target "$GITHUB_SHA" \
-            --title "kl!ck $ver для macOS" --notes-file notes.md
+        run: scripts/macos/publish-release.sh
