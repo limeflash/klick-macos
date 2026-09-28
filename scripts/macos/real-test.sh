@@ -76,20 +76,23 @@ for host, port in (('stun.l.google.com', 19302), ('stun.cloudflare.com', 3478)):
 sys.exit(1)
 PY
 }
+# Адрес из сети Mac. Сеть, а не один адрес: провайдер (и раннер GitHub) может выпускать соединения
+# с разных адресов одного пула (…117.214, …117.215), а адрес сервера VPN из другой сети.
+is_direct() { [[ -n "$1" && "${1%.*}" == "${direct%.*}" ]]; }
 # Защищённая программа ни разу не вышла в интернет напрямую за столько-то секунд.
 ks_never_direct() {
     local end=$((SECONDS + $1)) ip
     while (( SECONDS < end )); do
         ip="$(as_user "$ks" -4 -s -m 2 https://api.ipify.org 2>/dev/null | tr -d '[:space:]')"
-        if [[ -n "$ip" && "$ip" == "$direct" ]]; then
+        if is_direct "$ip"; then
             echo "    защищённая программа вышла напрямую на $((SECONDS - end + $1))-й секунде" >&2
             return 1
         fi
         sleep 0.2
     done
 }
-ks_via_vpn() { local ip; ip="$(ip_via "$ks")" && [[ "$ip" != "$direct" ]]; }
-ks_direct_ok() { [[ "$(ip_via "$ks")" == "$direct" ]]; }
+ks_via_vpn() { local ip; ip="$(ip_via "$ks")" && ! is_direct "$ip"; }
+ks_direct_ok() { is_direct "$(ip_via "$ks")"; }
 ks_direct_blocked() { ! as_user "$ks" -4 -s -o /dev/null -m 5 https://api.ipify.org; }
 # Скачать 20 МБ и напечатать скорость — для сведения: сервис замера может ограничивать адреса дата-центров.
 speed() { # speed [аргументы curl…]
@@ -146,7 +149,7 @@ cli routing all >/dev/null
 cli mode proxy >/dev/null
 cli connect >/dev/null
 check "подключено" wait_for 30 state_is connected
-vpn="$(ip_via /usr/bin/curl -x http://127.0.0.1:7890)" && [[ "$vpn" != "$direct" ]] \
+vpn="$(ip_via /usr/bin/curl -x http://127.0.0.1:7890)" && ! is_direct "$vpn" \
     && pass "через прокси адрес выхода — сервера, не Mac" || fail "через прокси адрес выхода — сервера, не Mac"
 where via_vpn
 speed -x http://127.0.0.1:7890
@@ -157,10 +160,10 @@ echo "== режим VPN (TUN), всё через VPN"
 cli mode tun >/dev/null
 cli connect >/dev/null
 check "подключено" wait_for 30 state_is connected
-vpn="$(ip_via /usr/bin/curl)" && [[ "$vpn" != "$direct" ]] \
+vpn="$(ip_via /usr/bin/curl)" && ! is_direct "$vpn" \
     && pass "адрес выхода по TCP — сервера" || fail "адрес выхода по TCP — сервера"
 if [[ -n "$direct_udp" ]]; then
-    u="$(udp_ip)" && [[ "$u" != "$direct_udp" ]] && pass "UDP идёт через VPN (STUN видит сервер)" || fail "UDP идёт через VPN (STUN видит сервер)"
+    u="$(udp_ip)" && [[ "${u%.*}" != "${direct_udp%.*}" ]] && pass "UDP идёт через VPN (STUN видит сервер)" || fail "UDP идёт через VPN (STUN видит сервер)"
 fi
 report="$(cli ip)"
 json "c = d.get('via_vpn') or {}; print('    ' + ', '.join(str(x) for x in (c.get('country'), c.get('city'), c.get('provider')) if x))" <<< "$report"
@@ -176,7 +179,7 @@ if [[ ${#fast[@]} -gt 1 ]]; then
 fi
 cli disconnect >/dev/null
 check "адаптер убран" wait_for 10 bash -c '! ifconfig | grep -q "inet 198.18.0.1 "'
-now="$(ip_via /usr/bin/curl)" && [[ "$now" == "$direct" ]] && pass "после отключения адрес снова свой" || fail "после отключения адрес снова свой"
+now="$(ip_via /usr/bin/curl)" && is_direct "$now" && pass "после отключения адрес снова свой" || fail "после отключения адрес снова свой"
 
 echo "== Kill Switch с настоящим сервером (положение «только выбранное»)"
 mkdir -p /Users/Shared/klick-ks/tool
@@ -188,7 +191,7 @@ check "VPN выключен — защищённая программа не в�
 cli connect >/dev/null
 check "VPN подключён" wait_for 30 state_is connected
 check "защищённая программа ходит через VPN" wait_for 30 ks_via_vpn
-now="$(ip_via /usr/bin/curl)" && [[ "$now" == "$direct" ]] && pass "остальные ходят напрямую" || fail "остальные ходят напрямую"
+now="$(ip_via /usr/bin/curl)" && is_direct "$now" && pass "остальные ходят напрямую" || fail "остальные ходят напрямую"
 kill -9 "$(cat /var/run/klick/core.sock.pid)"
 check "упало ядро — защищённая программа не вышла напрямую" ks_never_direct 10
 check "ядро вернулось, защищённая программа снова через VPN" wait_for 60 ks_via_vpn
@@ -210,7 +213,7 @@ echo "== удаление"
 check "прокси не остался" bash -c '! scutil --proxy | grep -q "HTTPPort : 7890"'
 check "DNS не остался" bash -c '! scutil --dns | grep -q "198.18.0.2"'
 check "правил pf не осталось" bash -c '! pfctl -a com.apple/090.klick -s rules 2>/dev/null | grep -q block'
-now="$(ip_via /usr/bin/curl)" && [[ "$now" == "$direct" ]] && pass "интернет у пользователя свой" || fail "интернет у пользователя свой"
+now="$(ip_via /usr/bin/curl)" && is_direct "$now" && pass "интернет у пользователя свой" || fail "интернет у пользователя свой"
 
 if [[ $failed -gt 0 ]]; then
     echo "== не прошло проверок: $failed"
