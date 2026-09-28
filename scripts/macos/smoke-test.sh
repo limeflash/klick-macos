@@ -125,7 +125,9 @@ start_server && pass "тестовый сервер слушает 21080" || fai
 echo "== подключение и серверы"
 check "добавить ссылку" cli add "socks5://127.0.0.1:21080#CI"
 check "серверы (проверочное ядро)" cli servers
-cli latency | grep -q '"delay": [0-9]' && pass "задержка измерена" || fail "задержка измерена"
+# Первое соединение раннера наружу бывает дольше 5 с (тайм-аут проверки) — как человек, жмём ещё раз.
+latency_ok() { cli latency | grep -q '"delay": [0-9]'; }
+check "задержка измерена" wait_for 30 latency_ok
 
 echo "== режим «Системный прокси»"
 cli mode proxy >/dev/null
