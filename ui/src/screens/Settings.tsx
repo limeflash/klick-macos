@@ -21,6 +21,13 @@ type Sub = null | 'ks' | 'down' | 'theme' | 'log' | 'about';
 
 const REPO = 'https://github.com/vbu00/klick';
 
+/** Авторы kl!ck; порт на macOS — только в версии для Mac. */
+const AUTHORS: [string, string, string][] = [
+  ['vbu00', 'Разработка', 'https://github.com/vbu00'],
+  ['Dmitriy Medvedev', 'Дизайн интерфейса и логотип', 'https://github.com/aleuuu'],
+  ...(isMac ? [['Daniyar Ennanov', 'Порт на macOS', 'https://github.com/limeflash'] as [string, string, string]] : []),
+];
+
 /** Скопировать в буфер обмена и сказать об этом. */
 function useCopy() {
   const { toast } = useStore();
@@ -615,6 +622,13 @@ function AboutScreen({ onBack }: { onBack: () => void }) {
         <KV k="Папка данных" mono>
           {about?.data_dir ?? '…'}
         </KV>
+      </div>
+
+      <SectionHead title="Авторы" />
+      <div className="card-list">
+        {AUTHORS.map(([name, role, url]) => (
+          <Row key={name} title={name} sub={role} onClick={() => void transport.openUrl(url)} chevron />
+        ))}
       </div>
 
       <div className="card-list mt12">

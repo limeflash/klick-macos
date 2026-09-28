@@ -166,10 +166,26 @@ fn clipboard_text() -> String {
         .unwrap_or_default()
 }
 
+/// Авторы kl!ck — в окне «О kl!ck» на macOS.
+#[cfg(target_os = "macos")]
+const COPYRIGHT: &str = "© vbu00, Dmitriy Medvedev · порт на macOS — Daniyar Ennanov";
+
 /// «Выход»: спросить в окне трея, отключить VPN или оставить его работать.
 fn request_exit(app: &AppHandle) {
     show_tray(app);
     let _ = app.emit_to("tray", "klick://exit-request", ());
+}
+
+/// macOS: окно «О kl!ck» — авторы.
+#[cfg(target_os = "macos")]
+fn about_metadata() -> tauri::menu::AboutMetadata<'static> {
+    tauri::menu::AboutMetadata {
+        credits: Some(
+            "Разработка — vbu00 (github.com/vbu00)\nДизайн интерфейса и логотип — Dmitriy Medvedev (github.com/aleuuu)\nПорт на macOS — Daniyar Ennanov (github.com/limeflash)".into(),
+        ),
+        copyright: Some(COPYRIGHT.into()),
+        ..Default::default()
+    }
 }
 
 /// macOS: своё меню приложения. «Выйти из kl!ck» (⌘Q) спрашивает про VPN, как «Выход» в трее;
@@ -182,7 +198,7 @@ fn macos_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         "kl!ck",
         true,
         &[
-            &PredefinedMenuItem::about(app, Some("О kl!ck"), None)?,
+            &PredefinedMenuItem::about(app, Some("О kl!ck"), Some(about_metadata()))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "app-settings", "Настройки…", true, Some("CmdOrCtrl+,"))?,
             &PredefinedMenuItem::separator(app)?,

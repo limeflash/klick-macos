@@ -1,5 +1,11 @@
 # kl!ck — исходники новой версии
 
+## Авторы
+
+* [vbu00](https://github.com/vbu00) — разработка
+* [Dmitriy Medvedev](https://github.com/aleuuu) — дизайн интерфейса и логотип
+* [Daniyar Ennanov](https://github.com/limeflash) — порт на macOS
+
 ## macOS
 
 Эта ветка — порт kl!ck 0.9.0 на macOS 12+ (Apple Silicon и Intel). Код Windows не менялся по поведению,

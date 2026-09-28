@@ -473,7 +473,9 @@ class MockService {
       case 'resume':
         return this.st;
       case 'about': {
-        const about: AboutView = { version: '0.9.0', core_version: 'v1.19.31', mixed_port: 7890, data_dir: 'C:\\ProgramData\\klick', os: 'Windows 11 · 25H2 · x64', dev: false };
+        const about: AboutView = isMac
+          ? { version: '0.9.0', core_version: 'v1.19.31', mixed_port: 7890, data_dir: '/Library/Application Support/klick', os: 'macOS 15.1 Sequoia · Apple Silicon', dev: false }
+          : { version: '0.9.0', core_version: 'v1.19.31', mixed_port: 7890, data_dir: 'C:\\ProgramData\\klick', os: 'Windows 11 · 25H2 · x64', dev: false };
         return about;
       }
       case 'log':
