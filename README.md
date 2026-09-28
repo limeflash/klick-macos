@@ -51,8 +51,9 @@ scripts/macos/build.sh --native    # только архитектура это�
 sudo installer -pkg dist/klick-0.9.0.pkg -target /
 ```
 
-Выпуск: `git tag v0.9.0 && git push origin v0.9.0` — workflow `.github/workflows/release.yml` соберёт
-пакет на Mac и выложит его в Releases (`klick-macos.pkg` — для ссылки выше, и `klick-0.9.0.pkg`).
+Выпуск: `git tag v0.9.0 && git push origin v0.9.0` или Actions → Release → Run workflow (тег `v` + версия
+из `Cargo.toml` встанет на выбранный коммит) — workflow `.github/workflows/release.yml` соберёт пакет на Mac,
+проверит его и выложит в Releases (`klick-macos.pkg` — для ссылки выше, и `klick-0.9.0.pkg`).
 
 ### Разработка
 

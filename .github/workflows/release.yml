@@ -1,5 +1,7 @@
-# Выпуск kl!ck для macOS: по тегу v* собрать пакет на Mac, проверить и выложить в Releases.
+# Выпуск kl!ck для macOS: собрать пакет на Mac, проверить и выложить в Releases. Запуск — тегом v*
 #   git tag v0.9.0 && git push origin v0.9.0
+# или вручную (Actions → Release → Run workflow на нужной ветке): тег v<версия из Cargo.toml> тогда
+# ставится на проверенный коммит при создании выпуска.
 # В выпуске два файла: klick-<версия>.pkg и klick-macos.pkg — для постоянной ссылки
 # https://github.com/<владелец>/<репозиторий>/releases/latest/download/klick-macos.pkg
 # Пакет не подписан сертификатом Apple (ставится из Терминала: sudo installer -pkg … -target /).
@@ -8,6 +10,7 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -33,11 +36,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Версия тега совпадает с версией в Cargo.toml
+      - name: Версия выпуска
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          tag="${GITHUB_REF_NAME#v}"
           ver="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-          [ "$tag" = "$ver" ] || { echo "тег $GITHUB_REF_NAME, а в Cargo.toml $ver"; exit 1; }
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            [ "${GITHUB_REF_NAME#v}" = "$ver" ] || { echo "тег $GITHUB_REF_NAME, а в Cargo.toml $ver"; exit 1; }
+          elif gh release view "v$ver" >/dev/null 2>&1; then
+            echo "выпуск v$ver уже есть — поднимите версию в Cargo.toml"; exit 1
+          fi
+          echo "VER=$ver" >> "$GITHUB_ENV"
+          echo "TAG=v$ver" >> "$GITHUB_ENV"
 
       - name: Сборка kl!ck.app и .pkg (universal)
         env:
@@ -58,7 +68,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ver="${GITHUB_REF_NAME#v}"
+          ver="$VER"
           cp "dist/klick-$ver.pkg" dist/klick-macos.pkg
           cat > notes.md <<NOTES
           kl!ck $ver для macOS 12+ (Apple Silicon и Intel).
@@ -66,12 +76,13 @@ jobs:
           Установка из Терминала (пакет не подписан сертификатом Apple, поэтому так проще, чем двойным щелчком):
 
           \`\`\`sh
-          curl -fL -o /tmp/klick.pkg https://github.com/${{ github.repository }}/releases/download/$GITHUB_REF_NAME/klick-macos.pkg
+          curl -fL -o /tmp/klick.pkg https://github.com/${{ github.repository }}/releases/download/$TAG/klick-macos.pkg
           sudo installer -pkg /tmp/klick.pkg -target /
           open -a 'kl!ck'
           \`\`\`
 
           Удаление: \`sudo '/Applications/kl!ck.app/Contents/Resources/uninstall.sh'\`
           NOTES
-          gh release create "$GITHUB_REF_NAME" "dist/klick-$ver.pkg" dist/klick-macos.pkg \
+          # Тега ещё нет (ручной запуск) — gh ставит его на этот коммит.
+          gh release create "$TAG" "dist/klick-$ver.pkg" dist/klick-macos.pkg --target "$GITHUB_SHA" \
             --title "kl!ck $ver для macOS" --notes-file notes.md
