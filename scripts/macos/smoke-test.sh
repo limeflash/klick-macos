@@ -61,7 +61,10 @@ ks_never() {
 start_server() {
     "$work/mihomo-server" -d "$work" -f "$work/server.yaml" > "$work/server.log" 2>&1 &
     server_pid=$!
-    wait_for 10 nc -z 127.0.0.1 21080
+    wait_for 10 nc -z 127.0.0.1 21080 && return 0
+    echo "--- журнал тестового сервера" >&2
+    tail -20 "$work/server.log" >&2
+    return 1
 }
 
 cleanup() {
@@ -89,13 +92,18 @@ cat > "$work/server.yaml" <<'YAML'
 mixed-port: 0
 log-level: warning
 listeners:
-  - { name: s5, type: socks, port: 21080, listen: 127.0.0.1, udp: true }
+  - name: s5
+    type: socks
+    port: 21080
+    listen: 127.0.0.1
+    udp: true
 mode: rule
-rules: [MATCH,DIRECT]
+rules:
+  - MATCH,DIRECT
 YAML
 # Копия ядра: по пути установленного ядра проверка ниже считает ядра службы.
 cp "$core" "$work/mihomo-server"
-check "тестовый сервер слушает 21080" start_server
+start_server && pass "тестовый сервер слушает 21080" || fail "тестовый сервер слушает 21080"
 
 echo "== подключение и серверы"
 check "добавить ссылку" cli add "socks5://127.0.0.1:21080#CI"
@@ -160,7 +168,7 @@ check "упал сервер VPN — защищённая программа н�
 check "остальные ходят (положение «только выбранное»)" user_ok
 kill -9 "$(cat /var/run/klick/core.sock.pid)"
 check "упало ядро при мёртвом сервере — защищённая программа не выходит" ks_never 10
-check "сервер снова работает" start_server
+start_server && pass "сервер снова работает" || fail "сервер снова работает"
 check "защищённая программа снова ходит через VPN" wait_for 60 ks_ok
 cli disconnect >/dev/null
 check "после отключения защищённая программа не выходит" ks_never 4
