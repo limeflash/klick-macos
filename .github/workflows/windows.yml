@@ -1,5 +1,6 @@
 # Сборка и проверка kl!ck для Windows на раннерах GitHub: ядро mihomo (сверка SHA-256), build.ps1
-# (окно, служба, klick-setup.exe), тесты. Потом на Windows Server 2022 и 2025 — те же сценарии, что
+# (окно, служба, klick-setup.exe), тесты. При ручном запуске по умолчанию собирается kl!ck 0.9.0 из
+# архива как есть (без изменений порта на macOS), проверки — из этой ветки. Потом на Windows Server 2022 и 2025 — те же сценарии, что
 # в Песочнице Windows (sandbox\run.ps1, setup-test.ps1, ks-browser.ps1), каждый на чистой машине:
 #   service    — служба, TUN, прокси, Kill Switch, падения, смена сети, удаление (run.ps1)
 #   setup      — установщик поверх настоящей kl!ck 0.3.0 (собирается здесь же из vbu00/klick), все
@@ -16,6 +17,11 @@ on:
     paths-ignore: ['**.md', 'docs/**', 'LICENSE', 'scripts/macos/**', '.github/workflows/macos.yml']
   workflow_dispatch:
     inputs:
+      source:
+        description: Что собирать — kl!ck 0.9.0 из архива как есть (без порта на macOS) или эта ветка
+        type: choice
+        options: ['0.9.0', 'branch']
+        default: '0.9.0'
       sub:
         description: Ссылка подписки для проверки с настоящими серверами (необязательно)
         required: false
@@ -32,8 +38,23 @@ jobs:
   build:
     runs-on: windows-2022
     timeout-minutes: 90
+    env:
+      # Коммит «Import kl!ck 0.9.0 sources (Windows)»: исходники из архива klick-0.9.0-src.zip без изменений.
+      ARCHIVE_COMMIT: 505dc44
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Проверки (sandbox\, скрипты) — из этой ветки, программа — из архива 0.9.0 как есть.
+      - name: Исходники kl!ck 0.9.0 из архива, как прислали
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.source == '0.9.0' }}
+        run: |
+          $app = 'crates', 'ui', 'resources', 'Cargo.toml', 'Cargo.lock', '.cargo', 'build.ps1'
+          git rm -r -q @app
+          git checkout $env:ARCHIVE_COMMIT -- @app
+          git log -1 --format='%h %s' $env:ARCHIVE_COMMIT
+          Select-String -Path Cargo.toml -Pattern '^version'
 
       - uses: actions/setup-node@v4
         with:
