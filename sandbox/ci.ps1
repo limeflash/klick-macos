@@ -40,6 +40,9 @@ $entry, $reports, $summary = $plan
 
 Write-Host "== $Scenario ($entry) on $((Get-CimInstance Win32_OperatingSystem).Caption) $([Environment]::OSVersion.Version)"
 $ErrorActionPreference = 'Continue'
+# Windows PowerShell 5.1 из pwsh наследует PSModulePath с модулями PowerShell 7 и теряет часть команд
+# (Get-FileHash и др.); без переменной 5.1 берёт свои пути, как в Песочнице.
+Remove-Item Env:PSModulePath -ErrorAction SilentlyContinue
 & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$root\$entry" -NoShutdown *> "$root\results\run.out"
 
 foreach ($r in $reports) {

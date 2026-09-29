@@ -1,7 +1,9 @@
 # Проверка kl!ck с настоящими серверами из подписки — на раннере CI (sandbox\ci.ps1) или тестовом компьютере.
 # Ссылка подписки — в переменной KLICK_TEST_SUB, в отчёт она не пишется. kl!ck ставится установщиком,
-# в конце удаляется вместе с данными. Сценарии: прокси и VPN (TUN) «всё через VPN», UDP, DNS, смена сервера,
-# сеть без зашифрованного DNS, Kill Switch со сбоями ядра и службы, скорость «Отключить», удаление.
+# в конце удаляется вместе с данными. Сценарии: прокси и VPN (TUN) «всё через VPN», системный прокси для
+# обычных программ, UDP, DNS, смена сервера, по 6 включений и выключений в каждом режиме, смена режима на ходу,
+# 3 минуты под нагрузкой (обрывы, перезапуски ядра, память), сеть без зашифрованного DNS, Kill Switch со сбоями
+# ядра и службы, скорость «Отключить», удаление при включённом VPN.
 # Меняет настройки сети — только на тестовой машине.
 param([switch]$NoShutdown)
 
@@ -26,7 +28,7 @@ function KlickCli { (& "$inst\klick-cli.exe" --prod @args 2>&1 | Out-String).Tri
 function KlickJson { $t = & "$inst\klick-cli.exe" --prod @args 2>$null | Out-String; try { $t | ConvertFrom-Json | ForEach-Object { $_ } } catch { $null } }
 function WaitVpn([string]$want, [int]$seconds) {
     $end = (Get-Date).AddSeconds($seconds)
-    do { $s = KlickJson status; if ($s.vpn -eq $want) { return $s }; Start-Sleep 1 } while ((Get-Date) -lt $end)
+    do { $s = KlickJson status; if ($s.vpn -eq $want) { return $s }; Start-Sleep -Milliseconds 250 } while ((Get-Date) -lt $end)
     return $s
 }
 function Http([string]$exe = 'curl.exe', [string]$url = 'https://www.gstatic.com/generate_204', [string[]]$extra = @()) {
@@ -98,7 +100,16 @@ function KsNeverDirect([int]$seconds) {
 }
 function KsViaVpn { $ip = IpVia 'C:\kstest\curl.exe'; [bool]$ip -and -not (IsDirect $ip) }
 function ProxyReg { Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' }
-function CoreProc { Get-CimInstance Win32_Process -Filter "Name='mihomo.exe'" | Where-Object { $_.CommandLine -like '*ProgramData*' -and $_.CommandLine -notlike '*tester*' } }
+# Основное ядро (config.yaml); проверочное — с tester.yaml, страж — с guard.
+function CoreProc { Get-CimInstance Win32_Process -Filter "Name='mihomo.exe'" | Where-Object { $_.CommandLine -like '*ProgramData*' -and $_.CommandLine -like '*config.yaml*' -and $_.CommandLine -notlike '*guard*' } }
+# Адрес выхода, как его видит обычная программа с системным прокси (.NET читает настройки Windows).
+# Отдельный процесс: настройки прокси процесс читает один раз.
+function IpSystemProxy {
+    $r = & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -Command "try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 'https://api.ipify.org').Content } catch { '' }" 2>$null
+    $r = "$r".Trim()
+    if ($r -match '^\d+\.\d+\.\d+\.\d+$') { $r } else { '' }
+}
+function Mb([int]$id) { $p = Get-Process -Id $id -ErrorAction SilentlyContinue; if ($p) { [math]::Round($p.WorkingSet64 / 1MB) } else { 0 } }
 
 try {
     if (-not $sub) { throw 'нет KLICK_TEST_SUB' }
@@ -139,12 +150,16 @@ try {
     Check 'через порт 7890 адрес выхода — сервера, не компьютера' ([bool]$vpn -and -not (IsDirect $vpn))
     $reg = ProxyReg
     Check 'системный прокси поставлен' ($reg.ProxyEnable -eq 1 -and $reg.ProxyServer -eq '127.0.0.1:7890') ("ProxyEnable={0}, ProxyServer={1}" -f $reg.ProxyEnable, $reg.ProxyServer)
+    $sys = IpSystemProxy
+    Check 'обычные программы с системным прокси (.NET) идут через VPN' ([bool]$sys -and -not (IsDirect $sys)) $(if ($sys) { '' } else { 'нет ответа' })
     Speed @('-x', 'http://127.0.0.1:7890')
     DisconnectTimed 'Системный прокси'
     $st = KlickJson status
     Check 'прокси: выключено' ($st.vpn -eq 'off') ("vpn=" + $st.vpn)
     $reg = ProxyReg
     Check 'системный прокси снят' ($reg.ProxyEnable -eq 0) ("ProxyEnable=" + $reg.ProxyEnable)
+    $sys = IpSystemProxy
+    Check 'после отключения программы с системным прокси ходят напрямую' (IsDirect $sys)
 
     # 4. VPN (TUN), всё через VPN
     KlickCli mode tun | Out-Null
@@ -178,6 +193,68 @@ try {
     Check 'адаптер убран' (-not (Get-NetAdapter -Name klick -ErrorAction SilentlyContinue))
     $now = IpVia
     Check 'после отключения адрес снова свой' (IsDirect $now)
+
+    # 4б. Включается и выключается быстро и каждый раз правильно: по 6 раз в каждом режиме
+    foreach ($m in 'proxy', 'tun') {
+        KlickCli mode $m | Out-Null
+        $con = @(); $dis = @(); $bad = 0
+        for ($i = 1; $i -le 6; $i++) {
+            $t = Measure-Command { KlickCli connect | Out-Null; WaitVpn 'connected' 30 | Out-Null }
+            $con += $t.TotalSeconds
+            $st = KlickJson status
+            $ip = if ($m -eq 'proxy') { IpVia 'curl.exe' @('-x', 'http://127.0.0.1:7890') } else { IpVia }
+            if (-not $ip -or (IsDirect $ip)) { $bad++; Log "    $m, раз $i`: через VPN не пошло (vpn=$($st.vpn), адрес '$ip')" }
+            $t = Measure-Command { KlickCli disconnect | Out-Null }
+            $dis += $t.TotalSeconds
+            $ip = IpVia
+            if (-not (IsDirect $ip)) { $bad++; Log "    $m, раз $i`: после отключения адрес не свой ('$ip')" }
+        }
+        $c = $con | Measure-Object -Minimum -Maximum -Average
+        $d = $dis | Measure-Object -Minimum -Maximum -Average
+        Log ("    {0}: подключение {1:N1}…{2:N1} с (в среднем {3:N1}), отключение {4:N2}…{5:N2} с" -f $m, $c.Minimum, $c.Maximum, $c.Average, $d.Minimum, $d.Maximum)
+        Check "$m`: 6 раз включился и выключился, трафик каждый раз где надо" ($bad -eq 0) "сбоев $bad"
+        Check "$m`: подключение каждый раз быстрее 10 с" ($c.Maximum -le 10) ("{0:N1} с" -f $c.Maximum)
+        Check "$m`: отключение каждый раз быстрее 2 с" ($d.Maximum -le 2) ("{0:N2} с" -f $d.Maximum)
+    }
+
+    # 4в. Смена режима на ходу
+    KlickCli mode tun | Out-Null
+    KlickCli connect | Out-Null
+    WaitVpn 'connected' 30 | Out-Null
+    KlickCli mode proxy | Out-Null
+    $st = WaitVpn 'connected' 30
+    $ip = IpVia 'curl.exe' @('-x', 'http://127.0.0.1:7890')
+    $reg = ProxyReg
+    Check 'TUN → прокси на ходу: подключено, прокси стоит, трафик через VPN' ($st.vpn -eq 'connected' -and $reg.ProxyEnable -eq 1 -and [bool]$ip -and -not (IsDirect $ip)) ("vpn={0}, ProxyEnable={1}" -f $st.vpn, $reg.ProxyEnable)
+    Check 'TUN → прокси на ходу: адаптер убран' (-not (Get-NetAdapter -Name klick -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up'))
+    KlickCli mode tun | Out-Null
+    $st = WaitVpn 'connected' 30
+    Start-Sleep 1
+    $ip = IpVia
+    $reg = ProxyReg
+    Check 'прокси → TUN на ходу: подключено, прокси снят, трафик через VPN' ($st.vpn -eq 'connected' -and $reg.ProxyEnable -eq 0 -and [bool]$ip -and -not (IsDirect $ip)) ("vpn={0}, ProxyEnable={1}" -f $st.vpn, $reg.ProxyEnable)
+
+    # 4г. Стабильность: 3 минуты работы под нагрузкой (скачивание идёт фоном), запрос каждые 2 с
+    $core0 = (CoreProc | Select-Object -First 1).ProcessId
+    $svc = Get-Process klick-service -ErrorAction SilentlyContinue | Select-Object -First 1
+    $svcStart = Mb $svc.Id
+    $load = Start-Process curl.exe -ArgumentList '-s', '-o', 'NUL', '--max-time', '175', '--limit-rate', '3M', 'https://speed.cloudflare.com/__down?bytes=1000000000' -PassThru -WindowStyle Hidden
+    $ok = 0; $bad = 0; $end = (Get-Date).AddMinutes(3)
+    while ((Get-Date) -lt $end) {
+        if ((Http) -eq '204') { $ok++ } else { $bad++; Log ("    {0:HH:mm:ss}: запрос не прошёл" -f (Get-Date)) }
+        Start-Sleep 2
+    }
+    Stop-Process -Id $load.Id -Force -ErrorAction SilentlyContinue
+    $st = KlickJson status
+    $core1 = (CoreProc | Select-Object -First 1).ProcessId
+    $svcEnd = Mb $svc.Id
+    $coreMb = Mb $core1
+    Log ("    запросов {0}, не прошло {1}; память: служба {2}→{3} МБ, ядро {4} МБ" -f ($ok + $bad), $bad, $svcStart, $svcEnd, $coreMb)
+    Check 'стабильность: 3 минуты без обрывов (не прошло не больше 2% запросов)' ($ok -gt 0 -and $bad -le [math]::Max(1, [math]::Floor(($ok + $bad) * 0.02))) "не прошло $bad из $($ok + $bad)"
+    Check 'стабильность: VPN всё время подключён, ядро не перезапускалось' ($st.vpn -eq 'connected' -and $core1 -and $core1 -eq $core0) ("vpn={0}, ядро {1}→{2}" -f $st.vpn, $core0, $core1)
+    Check 'стабильность: служба лёгкая (меньше 100 МБ) и не растёт' ($svcEnd -gt 0 -and $svcEnd -lt 100 -and $svcEnd -le $svcStart + 20) ("{0}→{1} МБ" -f $svcStart, $svcEnd)
+    Check 'стабильность: ядро меньше 400 МБ' ($coreMb -gt 0 -and $coreMb -lt 400) ("$coreMb МБ")
+    KlickCli disconnect | Out-Null
 
     # 5. Сеть, где зашифрованный DNS (DoH Cloudflare и Яндекса) не работает: адреса серверов kl!ck
     #    должен найти через DNS системы.

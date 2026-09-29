@@ -34,6 +34,18 @@ wait_for() { # wait_for секунд команда…
 state_is() { cli status | grep -q "\"vpn\": \"$1\""; }
 json() { /usr/bin/python3 -c "import json,sys; d=json.load(sys.stdin); $1"; }
 seconds() { local TIMEFORMAT=%R; { time "$@" >/dev/null 2>&1; } 2>&1; }
+# Адрес выхода, как его видит обычная программа с системным прокси (Python берёт настройки macOS).
+ip_system_proxy() {
+    as_user /usr/bin/python3 -c 'import sys, urllib.request
+try:
+    print(urllib.request.urlopen("https://api.ipify.org", timeout=10).read().decode().strip())
+except Exception:
+    sys.exit(1)' 2>/dev/null
+}
+connect_wait() { cli connect >/dev/null; wait_for 30 state_is connected; }
+stats() { printf '%s\n' "$@" | awk 'NR == 1 { mn = $1; mx = $1 } { s += $1; if ($1 < mn) mn = $1; if ($1 > mx) mx = $1 } END { printf "%.2f %.2f %.2f", mn, mx, s / NR }'; }
+at_most() { awk -v t="$1" -v max="$2" 'BEGIN { exit !(t <= max) }'; }
+rss_mb() { ps -o rss= -p "$1" 2>/dev/null | awk '{ printf "%d", $1 / 1024 }'; }
 # «Отключить» — сразу, а не через 8–10 с: время команды и шаги из журнала службы.
 disconnect_timed() { # disconnect_timed "режим"
     local took
@@ -170,9 +182,13 @@ check "подключено" wait_for 30 state_is connected
 vpn="$(ip_via /usr/bin/curl -x http://127.0.0.1:7890)" && ! is_direct "$vpn" \
     && pass "через прокси адрес выхода — сервера, не Mac" || fail "через прокси адрес выхода — сервера, не Mac"
 where via_vpn
+sys_ip="$(ip_system_proxy)" && ! is_direct "$sys_ip" \
+    && pass "обычные программы с системным прокси идут через VPN" || fail "обычные программы с системным прокси идут через VPN"
 speed -x http://127.0.0.1:7890
 disconnect_timed "Системный прокси"
 check "выключено" wait_for 10 state_is off
+sys_ip="$(ip_system_proxy)" && is_direct "$sys_ip" \
+    && pass "после отключения программы с системным прокси ходят напрямую" || fail "после отключения программы с системным прокси ходят напрямую"
 
 echo "== режим VPN (TUN), всё через VPN"
 cli mode tun >/dev/null
@@ -198,6 +214,69 @@ fi
 disconnect_timed "VPN (TUN)"
 check "адаптер убран" wait_for 10 bash -c '! ifconfig | grep -q "inet 198.18.0.1 "'
 now="$(ip_via /usr/bin/curl)" && is_direct "$now" && pass "после отключения адрес снова свой" || fail "после отключения адрес снова свой"
+
+echo "== включается и выключается быстро и каждый раз правильно: по 6 раз в каждом режиме"
+for m in proxy tun; do
+    cli mode "$m" >/dev/null
+    bad=0; con=(); dis=()
+    for i in 1 2 3 4 5 6; do
+        con+=("$(seconds connect_wait)")
+        if [[ "$m" == proxy ]]; then ip="$(ip_via /usr/bin/curl -x http://127.0.0.1:7890)"; else ip="$(ip_via /usr/bin/curl)"; fi
+        if [[ -z "$ip" ]] || is_direct "$ip"; then bad=$((bad + 1)); echo "    $m, раз $i: через VPN не пошло"; fi
+        dis+=("$(seconds cli disconnect)")
+        ip="$(ip_via /usr/bin/curl)"
+        is_direct "$ip" || { bad=$((bad + 1)); echo "    $m, раз $i: после отключения адрес не свой"; }
+    done
+    read -r cmin cmax cavg <<< "$(stats "${con[@]}")"
+    read -r dmin dmax _ <<< "$(stats "${dis[@]}")"
+    echo "    $m: подключение $cmin…$cmax с (в среднем $cavg), отключение $dmin…$dmax с"
+    check "$m: 6 раз включился и выключился, трафик каждый раз где надо" test "$bad" -eq 0
+    check "$m: подключение каждый раз быстрее 10 с ($cmax с)" at_most "$cmax" 10
+    check "$m: отключение каждый раз быстрее 2 с ($dmax с)" at_most "$dmax" 2
+done
+
+echo "== смена режима на ходу"
+cli mode tun >/dev/null
+connect_wait
+cli mode proxy >/dev/null
+check "TUN → прокси: подключено" wait_for 30 state_is connected
+ip="$(ip_via /usr/bin/curl -x http://127.0.0.1:7890)" && ! is_direct "$ip" \
+    && pass "TUN → прокси: трафик через VPN" || fail "TUN → прокси: трафик через VPN"
+check "TUN → прокси: системный прокси стоит" bash -c 'scutil --proxy | grep -q "HTTPPort : 7890"'
+check "TUN → прокси: адаптер убран" wait_for 10 bash -c '! ifconfig | grep -q "inet 198.18.0.1 "'
+cli mode tun >/dev/null
+check "прокси → TUN: подключено" wait_for 30 state_is connected
+ip="$(ip_via /usr/bin/curl)" && ! is_direct "$ip" \
+    && pass "прокси → TUN: трафик через VPN" || fail "прокси → TUN: трафик через VPN"
+check "прокси → TUN: системный прокси снят" wait_for 5 bash -c '! scutil --proxy | grep -q "HTTPPort : 7890"'
+
+echo "== стабильность: 3 минуты под нагрузкой (VPN, TUN), запрос каждые 2 с"
+core0="$(cat /var/run/klick/core.sock.pid 2>/dev/null)"
+svc_pid="$(launchctl print system/app.klick.service | awk '/pid =/ {print $3}')"
+svc0="$(rss_mb "$svc_pid")"
+as_user /usr/bin/curl -s -o /dev/null --max-time 175 --limit-rate 3M 'https://speed.cloudflare.com/__down?bytes=1000000000' &
+load=$!
+ok=0; bad=0; end=$((SECONDS + 180))
+while (( SECONDS < end )); do
+    if [[ "$(as_user /usr/bin/curl -s -o /dev/null -m 10 -w '%{http_code}' https://www.gstatic.com/generate_204)" == "204" ]]; then
+        ok=$((ok + 1))
+    else
+        bad=$((bad + 1)); echo "    $(date +%T): запрос не прошёл"
+    fi
+    sleep 2
+done
+wait "$load" 2>/dev/null
+core1="$(cat /var/run/klick/core.sock.pid 2>/dev/null)"
+svc1="$(rss_mb "$svc_pid")"
+core_mb="$(rss_mb "$core1")"
+echo "    запросов $((ok + bad)), не прошло $bad; память: служба $svc0→$svc1 МБ, ядро $core_mb МБ"
+allowed=$(( (ok + bad) * 2 / 100 )); (( allowed < 1 )) && allowed=1
+check "стабильность: 3 минуты без обрывов (не прошло $bad из $((ok + bad)))" test "$bad" -le "$allowed"
+state_is connected && [[ -n "$core0" && "$core0" == "$core1" ]] \
+    && pass "стабильность: VPN всё время подключён, ядро не перезапускалось" || fail "стабильность: VPN всё время подключён, ядро не перезапускалось"
+check "стабильность: служба лёгкая, меньше 100 МБ, и не растёт ($svc0→$svc1 МБ)" bash -c "(( ${svc1:-0} > 0 && ${svc1:-0} < 100 && ${svc1:-0} <= ${svc0:-0} + 20 ))"
+check "стабильность: ядро меньше 400 МБ ($core_mb МБ)" bash -c "(( ${core_mb:-0} > 0 && ${core_mb:-0} < 400 ))"
+cli disconnect >/dev/null
 
 echo "== зашифрованный DNS недоступен (как у тестера в Турции)"
 # Сеть, где DoH Яндекса и Cloudflare не работает: адреса серверов kl!ck должен найти через DNS системы.

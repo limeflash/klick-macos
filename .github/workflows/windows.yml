@@ -94,12 +94,15 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # cmd, а не pwsh: Windows PowerShell 5.1, запущенный из pwsh, получает чужой PSModulePath
+      # и не находит Get-FileHash (его зовёт tools\fetch-core.ps1).
       - name: Сборка kl!ck 0.3.0 (NSIS)
+        shell: cmd
         run: |
-          npm ci
-          npm run core
-          npx tauri build
-          Get-ChildItem src-tauri\target\release\bundle\nsis
+          call npm ci || exit /b 1
+          call npm run core || exit /b 1
+          call npx tauri build || exit /b 1
+          dir src-tauri\target\release\bundle\nsis
 
       - uses: actions/upload-artifact@v4
         with:
