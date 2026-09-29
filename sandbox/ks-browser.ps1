@@ -3,6 +3,9 @@
 # системного прокси, что у Chrome. kl!ck ставится установщиком, окно kl!ck работает (оно и ставит
 # системный прокси), Edge живёт всё время, как браузер у человека; VPN включается и выключается много раз.
 
+# -NoShutdown: не выключать компьютер в конце (CI: раннер GitHub, sandbox\ci.ps1).
+param([switch]$NoShutdown)
+
 $ErrorActionPreference = 'Continue'
 $root = 'C:\klick'
 $out = Join-Path $root 'results'
@@ -23,7 +26,8 @@ try {
     Copy-Item "$root\bin\klick-cli.exe" $inst -Force
 
     # Тестовый «VPN-сервер»: второй mihomo с socks5 (как в run.ps1)
-    $nic = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.Name -ne 'klick' } | Select-Object -First 1
+    $route = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1
+    $nic = if ($route) { Get-NetAdapter -InterfaceIndex $route.ifIndex } else { Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.Name -ne 'klick' } | Select-Object -First 1 }
     $ip = (Get-NetIPAddress -InterfaceIndex $nic.ifIndex -AddressFamily IPv4 | Select-Object -First 1).IPAddress
     $srv = 'C:\srv'
     New-Item -ItemType Directory -Force $srv | Out-Null
@@ -59,6 +63,8 @@ catch {
 finally {
     Copy-Item 'C:\ProgramData\klick\logs\service.log' "$out\service.log" -ErrorAction SilentlyContinue
     Set-Content "$out\script-done.txt" 'done'
-    Start-Sleep 2
-    shutdown.exe /s /t 0
+    if (-not $NoShutdown) {
+        Start-Sleep 2
+        shutdown.exe /s /t 0
+    }
 }
