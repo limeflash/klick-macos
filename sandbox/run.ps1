@@ -165,12 +165,14 @@ try {
     # 5. «Только выбранное»: обычный сайт напрямую, заблокированный сервис через VPN
     KlickCli routing selected | Out-Null
     Start-Sleep 1
+    # Обычный сайт — не www.gstatic.com: через него служба сама проверяет связь через VPN (PROBE_URL),
+    # и её проверка, совпавшая по времени (например, после смены сети), попадала в журнал «сервера».
     $n0 = (SrvLines).Count
-    $sel = Http 'curl.exe'
+    $sel = Http 'curl.exe' 'https://cp.cloudflare.com/generate_204'
     $yt = Http 'curl.exe' 'https://www.youtube.com/generate_204'
     Start-Sleep 1
     $new = SrvLines | Select-Object -Skip $n0
-    Check 'в «Только выбранное» обычный сайт идёт напрямую' ($sel -eq '204' -and -not ($new -match 'gstatic')) "код $sel"
+    Check 'в «Только выбранное» обычный сайт идёт напрямую' ($sel -eq '204' -and -not ($new -match 'cp\.cloudflare')) "код $sel"
     Check 'сервис из набора заблокированного идёт через VPN' ($yt -eq '204' -and ($new -match 'youtube')) "код $yt"
 
     # 6. Kill Switch

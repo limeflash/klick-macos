@@ -173,7 +173,14 @@ try {
     $code = Setup @('--uninstall', '--silent') "$inst\klick-setup.exe"
     Check 'удаление: код 0' ($code -eq 0) "код $code"
     Check 'служба удалена' (-not (Svc))
-    Check 'папки программы нет' (Gone $inst) ((@(Get-ChildItem $inst -Recurse -ErrorAction SilentlyContinue) | ForEach-Object { $_.Name }) -join ', ')
+    # Сколько папка программы живёт после удаления и что в ней остаётся (на раннерах CI — минуты).
+    $t0 = Get-Date
+    $still = @(Get-ChildItem -LiteralPath $inst -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($inst.Length + 1) })
+    Log ("    сразу после удаления в папке программы: {0}" -f $(if ($still) { $still -join ', ' } else { 'пусто или папки нет' }))
+    $gone = Gone $inst 15
+    $secs = ((Get-Date) - $t0).TotalSeconds
+    if (-not $gone) { $gone = Gone $inst 300; Log ("    папка пропала только через {0:N0} с" -f ((Get-Date) - $t0).TotalSeconds) }
+    Check 'папки программы нет (за 15 с)' ($secs -le 16 -and $gone) ("{0:N1} с" -f $secs)
     Check 'записи в «Установленных приложениях» нет' (-not (RegHas $uninst))
     Check 'ярлыков нет' (-not (Test-Path -LiteralPath $startLnk) -and -not (Test-Path -LiteralPath $publicLnk))
     Check 'автозапуска нет' ($null -eq (RegVal $run 'kl!ck') -and $null -eq (RegVal $approved 'kl!ck'))
