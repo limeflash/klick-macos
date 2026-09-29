@@ -69,6 +69,8 @@ jobs:
           rustc -V
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - name: Ядро mihomo (сверка SHA-256)
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\fetch-core.ps1
@@ -82,9 +84,6 @@ jobs:
           KLICK_RELEASES_REPO: vbu00/klick
         run: powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1
 
-      - name: Тесты
-        run: cargo test --workspace
-
       - name: Папка для проверок
         run: |
           New-Item -ItemType Directory -Force out | Out-Null
@@ -96,6 +95,14 @@ jobs:
         with:
           name: klick-windows
           path: out
+
+      # После выкладки сборки: если тесты упадут, сценарии всё равно проверят программу.
+      # build.rs установщика берёт в архив klick.exe и klick-service.exe из target\<профиль>; отладочных
+      # нет (build.ps1 собирает release) — берём release, иначе cargo test на чистой машине не соберётся.
+      - name: Тесты
+        env:
+          KLICK_PAYLOAD_BIN: ${{ github.workspace }}\target\release
+        run: cargo test --workspace
 
   # Прежняя kl!ck 0.3.0 из исходников vbu00/klick: её установщик NSIS ставится без окна (/S).
   old:
@@ -132,7 +139,7 @@ jobs:
 
   check:
     needs: [build, old]
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
