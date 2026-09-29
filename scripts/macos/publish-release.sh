@@ -1,7 +1,8 @@
 #!/bin/bash
 # Выложить собранный пакет в Releases: klick-<версия>.pkg и klick-macos.pkg — для постоянной ссылки
 # https://github.com/<владелец>/<репозиторий>/releases/latest/download/klick-macos.pkg
-# Версия — из Cargo.toml. Если тега v<версия> ещё нет, gh ставит его на этот коммит.
+# Версия — из Cargo.toml. Если тега v<версия> ещё нет, gh ставит его на этот коммит. Если выпуск уже
+# есть без пакета для macOS (например, с установщиком для Windows), пакет добавляется в него.
 # Запускают workflow после сборки и проверок (нужны GH_TOKEN и GITHUB_REPOSITORY):
 #   scripts/macos/publish-release.sh
 set -euo pipefail
@@ -13,12 +14,17 @@ repo="${GITHUB_REPOSITORY:?нужен GITHUB_REPOSITORY (владелец/реп
 commit="${GITHUB_SHA:-$(git rev-parse HEAD)}"
 pkg="dist/klick-$ver.pkg"
 [[ -f "$pkg" ]] || { echo "нет $pkg — сначала scripts/macos/build.sh" >&2; exit 1; }
+cp "$pkg" dist/klick-macos.pkg
 if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
-    echo "выпуск $tag уже есть — поднимите версию в Cargo.toml" >&2
-    exit 1
+    if gh release view "$tag" --repo "$repo" --json assets --jq '.assets[].name' | grep -qx 'klick-macos.pkg'; then
+        echo "в выпуске $tag пакет для macOS уже есть — поднимите версию в Cargo.toml" >&2
+        exit 1
+    fi
+    gh release upload "$tag" "$pkg" dist/klick-macos.pkg --repo "$repo"
+    echo "пакет для macOS добавлен в выпуск: https://github.com/$repo/releases/tag/$tag"
+    exit 0
 fi
 
-cp "$pkg" dist/klick-macos.pkg
 notes="$(mktemp)"
 trap 'rm -f "$notes"' EXIT
 cat > "$notes" <<NOTES

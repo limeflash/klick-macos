@@ -1,16 +1,36 @@
 #!/bin/bash
 # Обновление поверх прошлой версии, как у человека: ставим прошлый выпуск из Releases, подключаемся,
 # ставим новый пакет поверх — служба обновилась, подключения и настройки на месте, VPN вернулся сам.
+# Прошлый выпуск — самый свежий в Releases с пакетом для macOS (кроме проверяемой версии); если такого
+# ещё нет, проверять не с чего, и скрипт выходит без ошибки.
 # Меняет настройки сети Mac — запускать на тестовой машине или в CI.
 #
-#   sudo scripts/macos/upgrade-test.sh dist/klick-0.9.2.pkg [v0.9.1]
+#   sudo GITHUB_REPOSITORY=владелец/репозиторий scripts/macos/upgrade-test.sh dist/klick-<версия>.pkg [тег прошлого выпуска]
 set -uo pipefail
 
 [[ $EUID -eq 0 ]] || { echo "нужен root: sudo $0 $*" >&2; exit 2; }
 new_pkg="${1:?путь к новому .pkg}"
 [[ -f "$new_pkg" ]] || { echo "нет $new_pkg" >&2; exit 2; }
-old_tag="${2:-v0.9.1}"
-repo="${GITHUB_REPOSITORY:-limeflash/klick-macos}"
+repo="${GITHUB_REPOSITORY:?нужен GITHUB_REPOSITORY (владелец/репозиторий с выпусками)}"
+new_ver="$(basename "$new_pkg" .pkg)"; new_ver="${new_ver#klick-}"
+old_tag="${2:-}"
+if [[ -z "$old_tag" ]]; then
+    auth=()
+    [[ -n "${GH_TOKEN:-}" ]] && auth=(-H "Authorization: Bearer $GH_TOKEN")
+    releases="$(curl -fsSL ${auth[@]+"${auth[@]}"} "https://api.github.com/repos/$repo/releases?per_page=50")" \
+        || { echo "не прочитать список выпусков $repo" >&2; exit 1; }
+    old_tag="$(printf '%s' "$releases" | /usr/bin/python3 -c '
+import json, sys
+for r in json.load(sys.stdin):
+    if not r.get("draft") and r["tag_name"] != sys.argv[1] and any(a["name"] == "klick-macos.pkg" for a in r.get("assets", [])):
+        print(r["tag_name"])
+        break
+' "v$new_ver")"
+fi
+if [[ -z "$old_tag" ]]; then
+    echo "== в $repo нет прошлого выпуска с пакетом для macOS — обновлять не с чего, пропускаю"
+    exit 0
+fi
 app="/Applications/kl!ck.app"
 svc="/Library/PrivilegedHelperTools/klick/klick-service"
 cli() { "$app/Contents/MacOS/klick-cli" --prod "$@"; }
@@ -42,7 +62,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-new_ver="$(basename "$new_pkg" .pkg)"; new_ver="${new_ver#klick-}"
 echo "== $(sw_vers -productName) $(sw_vers -productVersion) $(uname -m): $old_tag → $new_ver"
 
 echo "== прошлая версия $old_tag из Releases"
