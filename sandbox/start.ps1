@@ -17,7 +17,7 @@ New-Item -ItemType Directory -Force "$stage\bin", "$stage\results" | Out-Null
 Copy-Item "$app\target\$cfg\klick-service.exe", "$app\target\$cfg\klick-cli.exe", "$app\target\$cfg\klick.exe" "$stage\bin"
 Copy-Item "$app\resources" "$stage\resources" -Recurse
 # PowerShell 5.1 inside the Sandbox reads a script as UTF-8 only when it has a BOM.
-$scripts = @('run.ps1', 'setup-test.ps1')
+$scripts = @('run.ps1', 'setup-test.ps1', 'ui.ps1')
 if ($Script) { $scripts += "$Script.ps1" }
 foreach ($s in $scripts) {
     $text = [IO.File]::ReadAllText("$PSScriptRoot\$s", [Text.Encoding]::UTF8)
