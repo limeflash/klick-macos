@@ -162,7 +162,7 @@ try {
         $win = WaitKlick 30
         Check 'ссылка запустила kl!ck' ($null -ne $win)
         if ($win) {
-            $ui = WaitUi $win.Id @('second.example.org') 40
+            $ui = WaitUi $win.Id @('second.example.org') 60
             Log "    в окне: $ui"
             Check 'по ссылке открылся экран «Добавить»: виден домен' ($ui.Contains('second.example.org') -and $ui.Contains('Добавить подписку'))
             Check 'самой ссылки в окне нет' (-not $ui.Contains('SECRET'))

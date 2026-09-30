@@ -18,11 +18,20 @@ function UiText([int]$procId) {
 }
 
 # Подождать, пока в окне появится один из текстов; вернуть всё, что видно.
+# На холодном старте WebView2 (Windows Server 2022) дерево страницы может так и не появиться в
+# UI Automation, пока окно не получит фокус. Поэтому раз в 10 с без нужного текста окно получает
+# фокус, как от щелчка пользователя, и это пишется в отчёт.
 function WaitUi([int]$procId, [string[]]$any, [int]$seconds = 20) {
     $end = (Get-Date).AddSeconds($seconds)
+    $nudge = (Get-Date).AddSeconds(10)
     do {
         $t = UiText $procId
         foreach ($a in $any) { if ($t.Contains($a)) { return $t } }
+        if ((Get-Date) -gt $nudge) {
+            foreach ($w in (UiWindows $procId)) { try { $w.SetFocus() } catch {} }
+            if (Get-Command Log -ErrorAction SilentlyContinue) { Log '    текста страницы в окне нет: фокус на окно' }
+            $nudge = (Get-Date).AddSeconds(10)
+        }
         Start-Sleep -Milliseconds 300
     } while ((Get-Date) -lt $end)
     $t
