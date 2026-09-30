@@ -28,6 +28,7 @@ fn main() {
         check_direct_port: 27892,
         tun_device: "klick".into(),
         log_level: "info".into(),
+        core_exe: String::new(),
     };
     let mut settings = Settings { routing, ..Settings::default() };
     let rules = match os {

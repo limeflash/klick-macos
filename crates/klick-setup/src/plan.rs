@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn versions_compare_by_numbers() {
         assert_eq!(parse("0.10.0"), vec![0, 10, 0]);
-        assert!(parse("0.9.0") < parse("0.10.0"));
+        assert!(parse("0.4.9") < parse("0.4.10"));
         assert!(parse("v1.2") < parse("1.2.1"));
     }
 

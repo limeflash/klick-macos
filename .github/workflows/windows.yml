@@ -1,12 +1,13 @@
 # Сборка и проверка kl!ck для Windows на раннерах GitHub: ядро mihomo (сверка SHA-256), build.ps1
-# (окно, служба, klick-setup.exe), тесты. При ручном запуске по умолчанию собирается kl!ck 0.9.0 из
-# архива как есть (без изменений порта на macOS), проверки — из этой ветки. Потом на Windows Server 2022 и 2025 — те же сценарии, что
+# (окно, служба, klick-setup.exe), тесты. Потом на Windows Server 2022 и 2025 — те же сценарии, что
 # в Песочнице Windows (sandbox\run.ps1, setup-test.ps1, ks-browser.ps1), каждый на чистой машине:
 #   service    — служба, TUN, прокси, Kill Switch, падения, смена сети, удаление (run.ps1)
 #   setup      — установщик поверх настоящей kl!ck 0.3.0 (собирается здесь же из vbu00/klick), все
 #                проверки службы на установленной копии, переустановка, удаление (setup-test.ps1)
 #   ks-browser — Edge в Kill Switch, VPN много раз включается и выключается (ks-browser.ps1)
 #   real       — с настоящими серверами из подписки (real-test.ps1), только при ручном запуске со ссылкой.
+# При ручном запуске можно собрать kl!ck из vbu00/klick (main) как есть — проверки при этом из этой
+# ветки, кроме ссылок klick://add (их в той сборке ещё нет).
 # Ссылка подписки не сохраняется в репозитории и скрыта в журнале.
 name: Windows
 
@@ -18,10 +19,10 @@ on:
   workflow_dispatch:
     inputs:
       source:
-        description: Что собирать — kl!ck 0.9.0 из архива как есть (без порта на macOS) или эта ветка
+        description: Что собирать — эта ветка или vbu00/klick (main) как есть
         type: choice
-        options: ['0.9.0', 'branch']
-        default: '0.9.0'
+        options: ['branch', 'upstream']
+        default: 'branch'
       sub:
         description: Ссылка подписки для проверки с настоящими серверами (необязательно)
         required: false
@@ -38,22 +39,18 @@ jobs:
   build:
     runs-on: windows-2022
     timeout-minutes: 90
-    env:
-      # Коммит «Import kl!ck 0.9.0 sources (Windows)»: исходники из архива klick-0.9.0-src.zip без изменений.
-      ARCHIVE_COMMIT: 505dc44
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      # Проверки (sandbox\, скрипты) — из этой ветки, программа — из архива 0.9.0 как есть.
-      - name: Исходники kl!ck 0.9.0 из архива, как прислали
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.source == '0.9.0' }}
+      # Проверки (sandbox\, скрипты) — из этой ветки, программа — из vbu00/klick как есть.
+      - name: Исходники kl!ck из vbu00/klick (main)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.source == 'upstream' }}
         run: |
-          $app = 'crates', 'ui', 'resources', 'Cargo.toml', 'Cargo.lock', '.cargo', 'build.ps1'
+          git fetch --depth 1 https://github.com/vbu00/klick main
+          $app = 'crates', 'ui', 'resources', 'Cargo.toml', 'Cargo.lock', '.cargo', 'build.ps1', 'tools'
           git rm -r -q @app
-          git checkout $env:ARCHIVE_COMMIT -- @app
-          git log -1 --format='%h %s' $env:ARCHIVE_COMMIT
+          git checkout FETCH_HEAD -- @app
+          git log -1 --format='%h %s' FETCH_HEAD
           Select-String -Path Cargo.toml -Pattern '^version'
 
       - uses: actions/setup-node@v4
@@ -72,8 +69,11 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Ядро mihomo (сверка SHA-256)
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\fetch-core.ps1
+      # Ядро и база стран не в git: tools\fetch-core.ps1 (его зовёт и build.ps1). Через cmd: Windows
+      # PowerShell 5.1, запущенный из pwsh, получает чужой PSModulePath и не находит Get-FileHash.
+      - name: Ядро mihomo и база стран (сверка SHA-256)
+        shell: cmd
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools\fetch-core.ps1
 
       - name: Зависимости интерфейса
         working-directory: ui
@@ -181,6 +181,8 @@ jobs:
           if ('${{ matrix.scenario }}' -eq 'real') {
             $env:KLICK_TEST_SUB = (Get-Content $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json).inputs.sub
           }
+          # Сборка vbu00/klick как есть — без ссылок klick://add: их проверки пропускаются.
+          if ('${{ inputs.source }}' -eq 'upstream') { $env:KLICK_NO_DEEPLINK = '1' }
           $a = @{ Scenario = $map['${{ matrix.scenario }}']; Build = (Resolve-Path build).Path }
           if ($old) { $a.Old = $old.FullName }
           & sandbox\ci.ps1 @a

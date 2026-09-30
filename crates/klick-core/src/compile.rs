@@ -17,9 +17,16 @@ pub const PROBE_URL: &str = "https://www.gstatic.com/generate_204";
 
 pub const SET_BLOCKED_DOMAINS: &str = "klick-blocked-domains";
 pub const SET_BLOCKED_IPS: &str = "klick-blocked-ips";
+/// Общий список заблокированного и закрывшегося для РФ (itdoginfo/allow-domains, ~1200 доменов,
+/// обновляется сообществом). У репозитория нет лицензии — в установщик не вшиваем: ядро качает
+/// его само, через VPN, раз в сутки. Не скачался — работает встроенный набор выше.
+pub const SET_BLOCKED_COMMUNITY: &str = "klick-blocked-community";
+pub const BLOCKED_COMMUNITY_URL: &str = "https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Russia/inside-clashx.lst";
 pub const SET_RU_DOMAINS: &str = "klick-ru-domains";
 
-const DNS_RU: [&str; 2] = ["https://77.88.8.8/dns-query", "77.88.8.8"];
+/// Яндекс по голому IP DoH не отдаёт (пустой ответ, проверено), а DoT — да.
+/// Обычный UDP — запасной и самый быстрый: ядро опрашивает все сразу.
+const DNS_RU: [&str; 2] = ["tls://77.88.8.8:853", "77.88.8.8"];
 const DNS_FOREIGN: [&str; 2] = ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"];
 
 /// Как трафик попадает в ядро.
@@ -46,6 +53,9 @@ pub struct CoreLayout {
     pub check_direct_port: u16,
     pub tun_device: String,
     pub log_level: String,
+    /// Путь к mihomo.exe: соединения проверочного ядра (замер задержки при
+    /// другом подключении) идут напрямую, а не через текущий туннель.
+    pub core_exe: String,
 }
 
 /// Файлы готовых наборов относительно домашней папки ядра.
@@ -86,7 +96,16 @@ pub fn compile(input: &CompileInput) -> Value {
         ]),
     );
     cfg.insert("rule-providers".into(), rule_providers(s, input.sets));
-    cfg.insert("rules".into(), Value::from(rules(s, input.catalog, layout.os)));
+    let mut all = Vec::new();
+    // Проверочное ядро — тот же исполняемый файл mihomo. Его соединения в TUN попали бы в
+    // туннель основного, и задержка «другого» подключения мерилась бы через
+    // текущий сервер. Собственные соединения основного ядра в TUN не входят.
+    let exe = layout.core_exe.trim_start_matches(r"\\?\");
+    if !exe.is_empty() {
+        all.push(format!("PROCESS-PATH-REGEX,{},DIRECT", exact_path_regex(exe)));
+    }
+    all.extend(rules(s, input.catalog, layout.os));
+    cfg.insert("rules".into(), Value::from(all));
     cfg.insert("dns".into(), dns(s, input.catalog, layout.os, input.server_dns));
     cfg.insert("sniffer".into(), sniffer());
     if input.capture == Capture::Tun {
@@ -205,6 +224,16 @@ fn rule_providers(s: &Settings, sets: &SetFiles) -> Value {
         Routing::Selected if s.blocked_preset => json!({
             SET_BLOCKED_DOMAINS: file("domain", &sets.blocked_domains),
             SET_BLOCKED_IPS: file("ipcidr", &sets.blocked_ips),
+            SET_BLOCKED_COMMUNITY: {
+                "type": "http",
+                "behavior": "classical",
+                "format": "text",
+                "url": BLOCKED_COMMUNITY_URL,
+                "path": "sets/blocked-community.lst",
+                "interval": 86400,
+                // С GitHub из России бывает плохо — качаем через VPN.
+                "proxy": VPN_GROUP,
+            },
         }),
         Routing::Selected => json!({}),
         Routing::AllVpn if s.russia_direct.domains => json!({
@@ -249,6 +278,14 @@ fn windows_folder_regex(folder: &str) -> String {
         }
     }
     re.push_str("\\\\.+$");
+    re
+}
+
+/// Ровно этот путь, без учёта регистра.
+pub fn exact_path_regex(path: &str) -> String {
+    let mut re = String::from("(?i)^");
+    push_escaped(&mut re, path);
+    re.push('$');
     re
 }
 
@@ -353,6 +390,7 @@ pub fn rules(s: &Settings, catalog: &Catalog, os: Os) -> Vec<String> {
             if s.blocked_preset {
                 out.push(format!("RULE-SET,{SET_BLOCKED_DOMAINS},{VPN_GROUP}"));
                 out.push(format!("RULE-SET,{SET_BLOCKED_IPS},{VPN_GROUP},no-resolve"));
+                out.push(format!("RULE-SET,{SET_BLOCKED_COMMUNITY},{VPN_GROUP}"));
             }
             out.push("MATCH,DIRECT".into());
         }
@@ -405,18 +443,20 @@ fn vpn_domains(s: &Settings, catalog: &Catalog) -> Vec<String> {
     out
 }
 
-/// Адреса серверов VPN. На Windows — зашифрованный DNS Яндекса и Cloudflare.
+/// Адреса серверов VPN. На Windows — DoT Яндекса, DoH Cloudflare и запасной обычный DNS Яндекса.
 /// На macOS сначала DNS системы: проверочное ядро (задержка серверов) ищет адреса через него, и если
 /// основное ядро ищет иначе, задержка «зелёная», а подключение сервер не находит. Зашифрованный DNS —
 /// запасной: ядро спрашивает всех сразу и берёт первый ответ, а DNS роутера отвечает раньше, чем
 /// успевает установиться соединение TLS; не отвечает — выручает зашифрованный.
 fn proxy_server_dns(os: Os, server_dns: &[String]) -> Value {
-    let encrypted = ["https://77.88.8.8/dns-query", "https://1.1.1.1/dns-query"];
+    // Обычный UDP Яндекса — запасной на случай, когда DoT и DoH в сети закрыты: иначе сервер,
+    // заданный доменом, не найдётся.
+    let common = ["tls://77.88.8.8:853", "https://1.1.1.1/dns-query", "77.88.8.8"];
     match os {
-        Os::Windows => json!(encrypted),
+        Os::Windows => json!(common),
         Os::MacOs => {
             let mut list: Vec<String> = if server_dns.is_empty() { vec!["system".into()] } else { server_dns.to_vec() };
-            list.extend(encrypted.iter().map(|u| u.to_string()));
+            list.extend(common.iter().map(|u| u.to_string()));
             json!(list)
         }
     }
@@ -463,6 +503,7 @@ fn dns(s: &Settings, catalog: &Catalog, os: Os, server_dns: &[String]) -> Value 
         "nameserver": nameserver,
         "nameserver-policy": policy,
         "direct-nameserver": ru,
+        // Адреса самих серверов — напрямую.
         "proxy-server-nameserver": proxy_server_dns(os, server_dns),
     })
 }
@@ -473,10 +514,15 @@ fn sniffer() -> Value {
         "force-dns-mapping": true,
         "parse-pure-ip": true,
         "override-destination": false,
+        // TLS и QUIC — с подменой адреса на имя сайта. С `ipv6: true` туннель забирает и
+        // IPv6, а браузер со своим DoH (Chrome, Edge при DNS 1.1.1.1) идёт на IPv6-адрес сайта:
+        // сервер без IPv6 его не откроет, и страница висит — TUN уже принял соединение, и браузер
+        // не откатывается на IPv4. Имя из SNI уходит на сервер вместо адреса, сервер находит сайт
+        // сам. Утечки нет: IPv6 без имени (пиры торрентов, звонки) просто не пройдёт мимо VPN.
         "sniff": {
-            "TLS": { "ports": [443, 8443] },
+            "TLS": { "ports": [443, 8443], "override-destination": true },
             "HTTP": { "ports": [80, "8080-8880"], "override-destination": true },
-            "QUIC": { "ports": [443, 8443] }
+            "QUIC": { "ports": [443, 8443], "override-destination": true }
         },
         "skip-domain": ["+.push.apple.com"]
     })
@@ -497,6 +543,7 @@ mod tests {
             check_direct_port: 17892,
             tun_device: "klick".into(),
             log_level: "warning".into(),
+            core_exe: r"C:\Program Files\kl!ck\resources\core\mihomo.exe".into(),
         }
     }
 
@@ -643,11 +690,26 @@ mod tests {
     }
 
     #[test]
+    fn tester_core_goes_direct_not_through_tunnel() {
+        let s = Settings::default();
+        let (c, mut l, st) = (catalog(), layout(), sets());
+        l.core_exe = r"\\?\C:\Program Files\kl!ck\resources\core\mihomo.exe".into();
+        let cfg = compile(&CompileInput { settings: &s, catalog: &c, layout: &l, capture: Capture::Tun, provider_path: "providers/a.txt", sets: &st, server_dns: &[] });
+        assert_eq!(cfg["rules"][0], r"PROCESS-PATH-REGEX,(?i)^C:\\Program Files\\kl!ck\\resources\\core\\mihomo\.exe$,DIRECT");
+        let d = &cfg["dns"];
+        assert_eq!(d["proxy-server-nameserver"][2], "77.88.8.8", "запасной UDP для адресов серверов");
+        // IPv6 в туннеле: TLS и QUIC уходят на сервер по имени сайта, не по IPv6-адресу.
+        assert_eq!(cfg["ipv6"], true);
+        assert_eq!(cfg["sniffer"]["sniff"]["TLS"]["override-destination"], true);
+        assert_eq!(cfg["sniffer"]["sniff"]["QUIC"]["override-destination"], true);
+    }
+
+    #[test]
     fn dns_asks_blocked_names_through_vpn() {
         let mut s = Settings::default();
         s.lists.selected.push(Rule { target: Target::Domain("claude.ai".into()), route: Route::Vpn, enabled: true });
         let d = dns(&s, &catalog(), Os::Windows, &[]);
-        assert_eq!(d["nameserver"][0], "https://77.88.8.8/dns-query");
+        assert_eq!(d["nameserver"][0], "tls://77.88.8.8:853");
         assert_eq!(d["nameserver-policy"]["+.claude.ai"][0], "https://1.1.1.1/dns-query#klick-vpn");
         assert!(d["nameserver-policy"][format!("rule-set:{SET_BLOCKED_DOMAINS}")].is_array());
     }
@@ -664,7 +726,7 @@ mod tests {
 
         s.blocked_preset = false;
         let r = rules(&s, &catalog(), Os::Windows);
-        assert!(!r.iter().any(|x| x.contains(SET_BLOCKED_DOMAINS) || x.contains(SET_BLOCKED_IPS)));
+        assert!(!r.iter().any(|x| x.contains(SET_BLOCKED_DOMAINS) || x.contains(SET_BLOCKED_IPS) || x.contains(SET_BLOCKED_COMMUNITY)));
         assert_eq!(r.last().unwrap(), "MATCH,DIRECT");
         assert_eq!(rule_providers(&s, &sets()), json!({}));
         assert!(dns(&s, &catalog(), Os::Windows, &[])["nameserver-policy"].get(format!("rule-set:{SET_BLOCKED_DOMAINS}")).is_none());
@@ -687,7 +749,12 @@ mod tests {
     }
 
     fn mac_layout() -> CoreLayout {
-        CoreLayout { os: Os::MacOs, controller: "/Library/Application Support/klick/run/core.sock".into(), ..layout() }
+        CoreLayout {
+            os: Os::MacOs,
+            controller: "/Library/Application Support/klick/run/core.sock".into(),
+            core_exe: "/Library/PrivilegedHelperTools/klick/mihomo".into(),
+            ..layout()
+        }
     }
 
     #[test]
@@ -722,10 +789,18 @@ mod tests {
     #[test]
     fn macos_finds_vpn_servers_through_system_dns_first() {
         let windows = proxy_server_dns(Os::Windows, &["192.168.1.1".into()]);
-        assert_eq!(windows, json!(["https://77.88.8.8/dns-query", "https://1.1.1.1/dns-query"]));
+        assert_eq!(windows, json!(["tls://77.88.8.8:853", "https://1.1.1.1/dns-query", "77.88.8.8"]));
         let mac = proxy_server_dns(Os::MacOs, &["192.168.1.1".into()]);
-        assert_eq!(mac, json!(["192.168.1.1", "https://77.88.8.8/dns-query", "https://1.1.1.1/dns-query"]));
+        assert_eq!(mac, json!(["192.168.1.1", "tls://77.88.8.8:853", "https://1.1.1.1/dns-query", "77.88.8.8"]));
         assert_eq!(proxy_server_dns(Os::MacOs, &[])[0], "system");
+    }
+
+    #[test]
+    fn macos_tester_core_goes_direct_not_through_tunnel() {
+        let s = Settings::default();
+        let (c, l, st) = (catalog(), mac_layout(), sets());
+        let cfg = compile(&CompileInput { settings: &s, catalog: &c, layout: &l, capture: Capture::Tun, provider_path: "providers/a.txt", sets: &st, server_dns: &[] });
+        assert_eq!(cfg["rules"][0], r"PROCESS-PATH-REGEX,(?i)^/Library/PrivilegedHelperTools/klick/mihomo$,DIRECT");
     }
 
     #[test]

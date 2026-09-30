@@ -3,7 +3,7 @@
 kl!ck — [vbu00](https://github.com/vbu00) (разработка) и [Dmitriy Medvedev](https://github.com/aleuuu)
 (дизайн интерфейса и логотип). Порт на macOS — [limeflash](https://github.com/limeflash).
 
-Порт сделан поверх исходников kl!ck 0.9.0 (Windows). Главное правило: **код Windows не менялся по
+Порт сделан поверх исходников kl!ck 0.4 для Windows (в архиве она называлась 0.9.0). Главное правило: **код Windows не менялся по
 поведению**, а всё macOS-специфичное лежит отдельно (`crates/klick-service/src/unix/…`, `#[cfg(…)]`
 в остальных местах). Так обновления, которые друзья делают для Windows, вливаются в эту ветку обычным
 `git merge`, а общая логика (сборка конфига mihomo, правила, страж связи, подписки) остаётся одна на
@@ -200,7 +200,7 @@ kl!ck — [vbu00](https://github.com/vbu00) (разработка) и [Dmitriy M
 ## Как собрать и проверить
 
 ```
-scripts/macos/build.sh              # dist/kl!ck.app и dist/klick-0.9.0.pkg (universal)
+scripts/macos/build.sh              # dist/kl!ck.app и dist/klick-<версия>.pkg (universal)
 scripts/macos/build.sh --native     # только архитектура этого Mac — быстрее
 sudo scripts/macos/smoke-test.sh 'dist/kl!ck.app'   # сквозная проверка (меняет настройки сети! только тестовый Mac)
 sudo scripts/macos/deeplink-test.sh dist/klick-*.pkg  # ссылки klick://add после установки пакета

@@ -12,9 +12,9 @@ name: macOS
 # Правки только документации и проверок Windows сборку на Mac не запускают.
 on:
   push:
-    paths-ignore: ['**.md', 'docs/**', 'LICENSE', 'sandbox/**', 'scripts/windows/**', 'build.ps1', '.github/workflows/windows.yml']
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE', 'sandbox/**', 'tools/**', 'build.ps1', '.github/workflows/windows.yml']
   pull_request:
-    paths-ignore: ['**.md', 'docs/**', 'LICENSE', 'sandbox/**', 'scripts/windows/**', 'build.ps1', '.github/workflows/windows.yml']
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE', 'sandbox/**', 'tools/**', 'build.ps1', '.github/workflows/windows.yml']
   workflow_dispatch:
     inputs:
       sub:

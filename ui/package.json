@@ -1,12 +1,13 @@
 {
   "name": "klick-ui",
   "private": true,
-  "version": "0.9.2",
+  "version": "0.9.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "check": "tsc --noEmit",
+    "screenshots": "node scripts/screenshots.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

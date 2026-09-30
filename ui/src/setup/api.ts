@@ -2,7 +2,7 @@
 // подставными данными: `setup.html?s=old`, `?s=maintain`, `?s=same`, `?s=newer`, `?s=uninstall`, `?s=fail`.
 
 export type Kind = 'install' | 'update' | 'reinstall' | 'uninstall';
-export type TaskId = 'stop' | 'files' | 'core' | 'old' | 'service' | 'shortcuts' | 'stop_service' | 'unhook' | 'driver' | 'remove' | 'data';
+export type TaskId = 'stop' | 'files' | 'core' | 'old' | 'service' | 'shortcuts' | 'stop_service' | 'unhook' | 'driver' | 'remove' | 'data' | 'migrate';
 
 export interface Installed {
   version: string;
@@ -49,6 +49,9 @@ export interface Outcome {
   rolled_back: boolean;
   notes: string[];
   path: string;
+  /** Перенос из прежней kl!ck: сколько подключений перенеслось и какие — нет. */
+  migrated?: number;
+  not_migrated?: string[];
 }
 
 export interface Request {
@@ -56,7 +59,10 @@ export interface Request {
   path: string;
   desktop: boolean;
   autostart: boolean;
+  /** Удаление — стереть данные; обновление и переустановка — начать с чистого листа. */
   wipe: boolean;
+  /** Перенести подписки прежней kl!ck (0.2–0.4). */
+  keep_old?: boolean;
 }
 
 export type PathCheck = { ok: true; path: string } | { ok: false; code: string };
@@ -81,7 +87,17 @@ export interface Api {
 /** Какие задачи будут — как в Rust (`steps::tasks`): чтобы список был на экране сразу. */
 export function expectedTasks(req: Request, info: Info): TaskId[] {
   if (req.kind === 'uninstall') return ['stop_service', 'unhook', 'driver', 'remove', ...(req.wipe ? (['data'] as TaskId[]) : [])];
-  return [...(req.kind === 'install' ? [] : (['stop'] as TaskId[])), 'files', 'core', ...(info.old ? (['old'] as TaskId[]) : []), 'service', 'shortcuts'];
+  const migrate = req.keep_old !== false && !!info.old?.data;
+  return [
+    ...(req.kind === 'install' ? [] : (['stop'] as TaskId[])),
+    'files',
+    'core',
+    ...(info.old ? (['old'] as TaskId[]) : []),
+    ...(req.kind !== 'install' && req.wipe ? (['data'] as TaskId[]) : []),
+    'service',
+    ...(migrate ? (['migrate'] as TaskId[]) : []),
+    'shortcuts',
+  ];
 }
 
 export async function createApi(): Promise<Api> {
@@ -126,9 +142,9 @@ const GB = 1024 ** 3;
 function mockApi(scenario: string): Api {
   const installed: Installed | null =
     scenario === 'maintain' || scenario === 'uninstall'
-      ? { version: '0.8.2', path: 'C:\\Program Files\\klick', relation: 'older' }
+      ? { version: '0.3.0', path: 'C:\\Program Files\\klick', relation: 'older' }
       : scenario === 'same'
-        ? { version: '0.9.0', path: 'C:\\Program Files\\klick', relation: 'same' }
+        ? { version: '0.4.0', path: 'C:\\Program Files\\klick', relation: 'same' }
         : scenario === 'newer'
           ? { version: '1.0.0', path: 'C:\\Program Files\\klick', relation: 'newer' }
           : null;
@@ -137,7 +153,7 @@ function mockApi(scenario: string): Api {
       ? { version: '0.2.1', dirs: ['C:\\Program Files\\kl!ck'], uninstaller: 'C:\\Program Files\\kl!ck\\uninstall.exe', data: 'C:\\Users\\user\\AppData\\Local\\com.vbu00.klick', task: true }
       : null;
   const info: Info = {
-    version: '0.9.0',
+    version: '0.4.0',
     core_version: 'v1.19.31',
     default_path: installed?.path ?? 'C:\\Program Files\\klick',
     size: 142 * 1024 * 1024,

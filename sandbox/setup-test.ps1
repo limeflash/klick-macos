@@ -69,6 +69,8 @@ $approved = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApp
 $notif = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings'
 $tray = 'HKCU:\Control Panel\NotifyIconSettings'
 $scheme = 'HKCU:\Software\Classes\klick'
+# Сборка со ссылками klick://add (у vbu00/klick как есть их ещё нет — CI ставит KLICK_NO_DEEPLINK).
+$deeplink = -not $env:KLICK_NO_DEEPLINK
 $startLnk = 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\kl!ck.lnk'
 $publicLnk = 'C:\Users\Public\Desktop\kl!ck.lnk'
 $userLnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'kl!ck.lnk'
@@ -151,44 +153,47 @@ try {
 
     # 1б. Ссылка klick://add со страницы подписки: открывает установленную kl!ck на экране «Добавить»,
     #     показывает домен, а не ссылку; следующие ссылки и ярлык — в ту же копию; плохая — «Ссылка не подходит».
-    Check 'схема klick:// зарегистрирована на установленную kl!ck' ((RegVal $scheme '(default)') -eq 'URL:kl!ck' -and $null -ne (RegVal $scheme 'URL Protocol') -and (RegVal "$scheme\shell\open\command" '(default)') -eq "`"$inst\klick.exe`" `"%1`"" -and (RegVal "$scheme\DefaultIcon" '(default)') -eq "`"$inst\klick.exe`",0") (RegVal "$scheme\shell\open\command" '(default)')
-    KlickProcs | Stop-Process -Force -ErrorAction SilentlyContinue
-    $connsBefore = Conns
-    Start-Process 'klick://add/https%3A%2F%2Fsecond.example.org%2Fs%2FSECRET-link-one'
-    $win = WaitKlick 30
-    Check 'ссылка запустила kl!ck' ($null -ne $win)
-    if ($win) {
-        $ui = WaitUi $win.Id @('second.example.org') 40
-        Log "    в окне: $ui"
-        Check 'по ссылке открылся экран «Добавить»: виден домен' ($ui.Contains('second.example.org') -and $ui.Contains('Добавить подписку'))
-        Check 'самой ссылки в окне нет' (-not $ui.Contains('SECRET'))
-        Screenshot "$out\deeplink-window.png"
+    # KLICK_NO_DEEPLINK — проверяется сборка без них (vbu00/klick как есть).
+    if ($deeplink) {
+        Check 'схема klick:// зарегистрирована на установленную kl!ck' ((RegVal $scheme '(default)') -eq 'URL:kl!ck' -and $null -ne (RegVal $scheme 'URL Protocol') -and (RegVal "$scheme\shell\open\command" '(default)') -eq "`"$inst\klick.exe`" `"%1`"" -and (RegVal "$scheme\DefaultIcon" '(default)') -eq "`"$inst\klick.exe`",0") (RegVal "$scheme\shell\open\command" '(default)')
+        KlickProcs | Stop-Process -Force -ErrorAction SilentlyContinue
+        $connsBefore = Conns
+        Start-Process 'klick://add/https%3A%2F%2Fsecond.example.org%2Fs%2FSECRET-link-one'
+        $win = WaitKlick 30
+        Check 'ссылка запустила kl!ck' ($null -ne $win)
+        if ($win) {
+            $ui = WaitUi $win.Id @('second.example.org') 40
+            Log "    в окне: $ui"
+            Check 'по ссылке открылся экран «Добавить»: виден домен' ($ui.Contains('second.example.org') -and $ui.Contains('Добавить подписку'))
+            Check 'самой ссылки в окне нет' (-not $ui.Contains('SECRET'))
+            Screenshot "$out\deeplink-window.png"
 
-        Start-Process 'klick://add?url=https%3A%2F%2Fcp.cloudflare.com%2Fklick%2FSECRET-link-two&name=CI%20link&v=2'
-        $ui = WaitUi $win.Id @('cp.cloudflare.com') 20
-        Start-Process "$inst\klick.exe"
-        Start-Sleep 4
-        $procs = KlickProcs
-        Check 'вторая ссылка и ярлык — в ту же копию kl!ck' ($procs.Count -eq 1 -and $ui.Contains('cp.cloudflare.com') -and -not $ui.Contains('SECRET')) ("klick.exe: {0}; в окне: {1}" -f $procs.Count, $ui)
+            Start-Process 'klick://add?url=https%3A%2F%2Fcp.cloudflare.com%2Fklick%2FSECRET-link-two&name=CI%20link&v=2'
+            $ui = WaitUi $win.Id @('cp.cloudflare.com') 20
+            Start-Process "$inst\klick.exe"
+            Start-Sleep 4
+            $procs = KlickProcs
+            Check 'вторая ссылка и ярлык — в ту же копию kl!ck' ($procs.Count -eq 1 -and $ui.Contains('cp.cloudflare.com') -and -not $ui.Contains('SECRET')) ("klick.exe: {0}; в окне: {1}" -f $procs.Count, $ui)
 
-        # «Добавить»: служба качает подписку (здесь — не подписка) и сообщает ошибку; ссылки нет в журнале.
-        $pressed = UiPress $win.Id 'Добавить подписку'
-        $ui = WaitUi $win.Id @('Не удалось скачать подписку', 'Панель подписки', 'Формат не распознан', 'В подписке нет серверов', 'По ссылке открывается страница') 40
-        Check 'подписку добавляет только кнопка: служба её скачала и отказала' ($pressed -and $ui -match 'Не удалось скачать|Панель подписки|Формат не распознан|нет серверов|открывается страница') $ui
+            # «Добавить»: служба качает подписку (здесь — не подписка) и сообщает ошибку; ссылки нет в журнале.
+            $pressed = UiPress $win.Id 'Добавить подписку'
+            $ui = WaitUi $win.Id @('Не удалось скачать подписку', 'Панель подписки', 'Формат не распознан', 'В подписке нет серверов', 'По ссылке открывается страница') 40
+            Check 'подписку добавляет только кнопка: служба её скачала и отказала' ($pressed -and $ui -match 'Не удалось скачать|Панель подписки|Формат не распознан|нет серверов|открывается страница') $ui
 
-        Start-Process 'klick://add?url=javascript%3Aalert(1)'
-        $ui = WaitUi $win.Id @('Ссылка не подходит') 3
-        Check 'плохая ссылка: «Ссылка не подходит»' ($ui.Contains('Ссылка не подходит'))
-        Start-Process 'klick://add?url=http%3A%2F%2Fsecond.example.org%2Fs'
-        $ui = WaitUi $win.Id @('Ссылка не подходит') 3
-        Check 'http:// в выпуске: «Ссылка не подходит»' ($ui.Contains('Ссылка не подходит'))
+            Start-Process 'klick://add?url=javascript%3Aalert(1)'
+            $ui = WaitUi $win.Id @('Ссылка не подходит') 3
+            Check 'плохая ссылка: «Ссылка не подходит»' ($ui.Contains('Ссылка не подходит'))
+            Start-Process 'klick://add?url=http%3A%2F%2Fsecond.example.org%2Fs'
+            $ui = WaitUi $win.Id @('Ссылка не подходит') 3
+            Check 'http:// в выпуске: «Ссылка не подходит»' ($ui.Contains('Ссылка не подходит'))
+        }
+        $logText = Get-Content 'C:\ProgramData\klick\logs\*.log' -Raw -ErrorAction SilentlyContinue
+        Check 'ссылок подписки нет в журнале службы' (-not ($logText -match 'SECRET-link'))
+        $connsAfter = Conns
+        Check 'по ссылкам ничего не добавилось' ($connsBefore -ge 0 -and $connsAfter -eq $connsBefore) ("подключений было {0}, стало {1}" -f $connsBefore, $connsAfter)
+        KlickProcs | Stop-Process -Force -ErrorAction SilentlyContinue
+        KlickProcs | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
     }
-    $logText = Get-Content 'C:\ProgramData\klick\logs\*.log' -Raw -ErrorAction SilentlyContinue
-    Check 'ссылок подписки нет в журнале службы' (-not ($logText -match 'SECRET-link'))
-    $connsAfter = Conns
-    Check 'по ссылкам ничего не добавилось' ($connsBefore -ge 0 -and $connsAfter -eq $connsBefore) ("подключений было {0}, стало {1}" -f $connsBefore, $connsAfter)
-    KlickProcs | Stop-Process -Force -ErrorAction SilentlyContinue
-    KlickProcs | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
 
     # 2. Все проверки службы — на установленной копии
     Log '--- run.ps1 -Preinstalled -KeepInstalled ---'
@@ -254,7 +259,7 @@ try {
     Check 'служба работает из своей папки' ((Svc).Status -eq 'Running' -and (Get-CimInstance Win32_Service -Filter "Name='klick'").PathName -like "*$custom*")
     Check 'без ярлыка на рабочем столе, в «Пуске» есть' (-not (Test-Path -LiteralPath $publicLnk) -and (LnkTarget $startLnk) -eq "$custom\klick.exe")
     Check 'без автозапуска' ($null -eq (RegVal $run 'kl!ck'))
-    Check 'схема klick:// ведёт в свою папку' ((RegVal "$scheme\shell\open\command" '(default)') -eq "`"$custom\klick.exe`" `"%1`"") (RegVal "$scheme\shell\open\command" '(default)')
+    if ($deeplink) { Check 'схема klick:// ведёт в свою папку' ((RegVal "$scheme\shell\open\command" '(default)') -eq "`"$custom\klick.exe`" `"%1`"") (RegVal "$scheme\shell\open\command" '(default)') }
     $acl = (Get-Acl $custom).Access
     $users = @($acl | Where-Object { $_.IdentityReference.Value -match 'Users$|Пользователи$' })
     $canWrite = @($users | Where-Object { $_.FileSystemRights -match 'Write|Modify|FullControl' })

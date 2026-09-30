@@ -16,6 +16,7 @@ mod tray;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(target_os = "macos")]
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
@@ -257,6 +258,29 @@ fn app_exit(app: AppHandle, clear_proxy: bool) {
     app.exit(0);
 }
 
+/// WM_ENDSESSION: Windows завершает сеанс (выключение, перезагрузка, выход). Окно — скрытое
+/// или нет — получает это сообщение; ловим его подклассом окна.
+#[cfg(windows)]
+mod session_end {
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+    use windows::Win32::UI::WindowsAndMessaging::WM_ENDSESSION;
+
+    unsafe extern "system" fn on_message(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, _data: usize) -> LRESULT {
+        if msg == WM_ENDSESSION && wp.0 != 0 {
+            crate::sysproxy::session_ending();
+        }
+        DefSubclassProc(hwnd, msg, wp, lp)
+    }
+
+    pub fn watch(window: &tauri::WebviewWindow) {
+        let Ok(hwnd) = window.hwnd() else { return };
+        unsafe {
+            let _ = SetWindowSubclass(HWND(hwnd.0 as _), Some(on_message), 1, 0);
+        }
+    }
+}
+
 /// «Перезапустить службу» на экране «Служба не отвечает»: переустановить её из этой программы.
 /// macOS спрашивает пароль администратора своим окном. VPN после перезапуска выключен — служба
 /// не начнёт переподключаться сама, если зависла именно на этом.
@@ -346,6 +370,10 @@ fn main() {
         .setup(|app| {
             bridge::start_events(app.handle().clone());
             fit_main(app.handle());
+            #[cfg(windows)]
+            if let Some(w) = app.get_webview_window("main") {
+                session_end::watch(&w);
+            }
             // Окно создаётся скрытым: при автозапуске оно остаётся в трее.
             if !std::env::args().any(|a| a == "--hidden") {
                 show_main(app.handle());
@@ -371,11 +399,16 @@ fn main() {
                 eprintln!("схема klick не зарегистрирована: {e}");
             }
 
-            // Левый щелчок — своё окно трея; правый — запасное меню.
-            let open = MenuItem::with_id(app, "open", "Открыть kl!ck", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &quit])?;
-            let mut tray = TrayIconBuilder::with_id("main").tooltip("kl!ck").menu(&menu).show_menu_on_left_click(false);
+            // Windows: левый щелчок — главное окно; правый — своё окно трея вместо системного меню
+            // («Выход» — крестиком в нём). macOS: щелчок — окно трея под значком, как у программ
+            // в строке меню; правый — запасное меню.
+            let mut tray = TrayIconBuilder::with_id("main").tooltip("kl!ck");
+            #[cfg(target_os = "macos")]
+            {
+                let open = MenuItem::with_id(app, "open", "Открыть kl!ck", true, None::<&str>)?;
+                let quit = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
+                tray = tray.menu(&Menu::with_items(app, &[&open, &quit])?).show_menu_on_left_click(false);
+            }
             if let Some(icon) = tray::initial().or_else(|| app.default_window_icon().cloned()) {
                 tray = tray.icon(icon);
             }
@@ -387,8 +420,16 @@ fn main() {
             })
             .on_tray_icon_event(|tray, event| {
                 tauri_plugin_positioner::on_tray_event(tray.app_handle(), &event);
-                if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
-                    toggle_tray(tray.app_handle());
+                if let TrayIconEvent::Click { button, button_state: MouseButtonState::Up, .. } = event {
+                    match button {
+                        #[cfg(windows)]
+                        MouseButton::Left => show_main(tray.app_handle()),
+                        #[cfg(windows)]
+                        MouseButton::Right => toggle_tray(tray.app_handle()),
+                        #[cfg(not(windows))]
+                        MouseButton::Left => toggle_tray(tray.app_handle()),
+                        _ => {}
+                    }
                 }
             })
             .build(app)?;
@@ -405,6 +446,15 @@ fn main() {
                 TRAY_HIDDEN_AT.store(now_ms(), Ordering::Relaxed);
                 let _ = window.hide();
             }
+            // Окна фиксированного размера: двойной щелчок по заголовку, Win+↑ и «прилипание» к краю
+            // экрана разворачивают их и без кнопки — сразу возвращаем как было.
+            (_, WindowEvent::Resized(_)) => {
+                if window.is_maximized().unwrap_or(false) {
+                    let _ = window.unmaximize();
+                }
+            }
+            // Окно перетащили на экран с другим масштабом: высоту — снова под рабочую область.
+            ("main", WindowEvent::ScaleFactorChanged { .. }) => fit_main(window.app_handle()),
             _ => {}
         })
         .build(tauri::generate_context!())

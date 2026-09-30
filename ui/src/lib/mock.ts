@@ -491,8 +491,8 @@ class MockService {
         return this.st;
       case 'about': {
         const about: AboutView = isMac
-          ? { version: '0.9.0', core_version: 'v1.19.31', mixed_port: 7890, data_dir: '/Library/Application Support/klick', os: 'macOS 15.1 Sequoia · Apple Silicon', dev: false }
-          : { version: '0.9.0', core_version: 'v1.19.31', mixed_port: 7890, data_dir: 'C:\\ProgramData\\klick', os: 'Windows 11 · 25H2 · x64', dev: false };
+          ? { version: '0.4.0', core_version: 'v1.19.31', mixed_port: 7890, data_dir: '/Library/Application Support/klick', os: 'macOS 15.1 Sequoia · Apple Silicon', dev: false }
+          : { version: '0.4.0', core_version: 'v1.19.31', mixed_port: 7890, data_dir: 'C:\\ProgramData\\klick', os: 'Windows 11 · 25H2 · x64', dev: false };
         return about;
       }
       case 'log':
@@ -501,10 +501,10 @@ class MockService {
         this.log = [];
         return [];
       case 'report':
-        return `kl!ck 0.9.0 · ядро v1.19.31 · Windows 11 · 25H2 · x64\nСостояние: ${this.st.vpn} · режим ${this.st.mode} · положение ${this.st.routing}\n(превью: тестовая служба)`;
+        return `kl!ck 0.4.0 · ядро v1.19.31 · Windows 11 · 25H2 · x64\nСостояние: ${this.st.vpn} · режим ${this.st.mode} · положение ${this.st.routing}\n(превью: тестовая служба)`;
       case 'check_update': {
         await wait(1100);
-        const u: UpdateView = { current: '0.9.0', latest: '0.3.0', url: 'https://github.com/vbu00/klick/releases/tag/v0.3.0', newer: false };
+        const u: UpdateView = { current: '0.4.0', latest: '0.3.0', url: 'https://github.com/vbu00/klick/releases/tag/v0.3.0', newer: false };
         return u;
       }
       case 'catalog':

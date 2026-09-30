@@ -60,6 +60,10 @@ pub enum Msg {
     #[cfg(unix)]
     KsWatchdog,
     Shutdown(oneshot::Sender<()>),
+    /// Ещё раз попробовать снять прокси, оставшийся с прошлого запуска: служба стартует
+    /// раньше входа в Windows, и ветки реестра пользователя тогда ещё нет.
+    #[cfg(windows)]
+    RetryLeftoverProxy,
 }
 
 #[derive(Clone)]
@@ -272,6 +276,20 @@ pub fn spawn(paths: Paths, profile: Profile) -> anyhow::Result<(EngineHandle, to
             None
         }
     };
+    // Прокси, оставшийся от прошлого запуска (компьютер выключили с включённым VPN), снимаем
+    // и после входа в Windows: первые 15 минут пробуем каждые 3 секунды, пока есть отметка.
+    #[cfg(windows)]
+    if paths.data.join("user-proxy.json").exists() {
+        let retry_tx = tx.clone();
+        tokio::spawn(async move {
+            for _ in 0..300 {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                if retry_tx.send(Msg::RetryLeftoverProxy).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
     // macOS: сторож Kill Switch — правила pf могла сбросить другая программа. Проверка — три вызова
     // pfctl и только пока правила стоят; чем чаще, тем короче окно, если pf выключит кто-то другой.
     #[cfg(unix)]
@@ -394,7 +412,7 @@ async fn check_update() -> Result<UpdateView, ErrorInfo> {
     Ok(UpdateView { current, latest: (!tag.is_empty()).then_some(tag), url, newer })
 }
 
-/// `0.10.0` новее `0.9.4`: сравниваем числа, а не строки.
+/// `0.4.10` новее `0.4.9`: сравниваем числа, а не строки.
 fn version_newer(latest: &str, current: &str) -> bool {
     let parse = |v: &str| v.split(['.', '-', '+']).take(3).map(|x| x.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>();
     parse(latest) > parse(current)
@@ -433,10 +451,7 @@ impl Engine {
             if self.restore_pending {
                 self.user_proxy_saved = Some(saved);
             } else {
-                if userproxy::clear(self.profile.mixed_port, Some(saved)) {
-                    tracing::info!("снят оставшийся системный прокси kl!ck");
-                }
-                let _ = std::fs::remove_file(&marker);
+                self.clear_leftover_proxy();
             }
         }
         if self.restore_pending {
@@ -463,6 +478,8 @@ impl Engine {
                             let _ = reply.send(self.ip_plan());
                         }
                         Msg::NetworkChanged => self.on_network_change().await,
+                        #[cfg(windows)]
+                        Msg::RetryLeftoverProxy => self.clear_leftover_proxy(),
                         Msg::CoreExited { generation, code } => self.on_core_exit(generation, code).await,
                         Msg::Probed { generation, retry, ok } => {
                             if self.probing == Some(generation) {
@@ -921,7 +938,9 @@ impl Engine {
         storage::save_settings(&self.paths, &self.settings).map_err(|e| {
             tracing::error!("настройки не сохранились: {e:#}");
             ErrorInfo::new("storage.write_failed")
-        })
+        })?;
+        self.emit(Event::Settings);
+        Ok(())
     }
 
     fn now_ms(&self) -> u64 {
@@ -1060,6 +1079,7 @@ impl Engine {
             check_direct_port: sys::free_port().map_err(internal)?,
             tun_device: TUN_DEVICE.into(),
             log_level: self.profile.core_log_level.clone(),
+            core_exe: std::fs::canonicalize(&self.paths.core_exe).unwrap_or_else(|_| self.paths.core_exe.clone()).to_string_lossy().into_owned(),
         };
         #[cfg(unix)]
         if !self.dns_overridden {
@@ -1170,6 +1190,27 @@ impl Engine {
         }
     }
 
+    /// Снять прокси, оставшийся с прошлого запуска. Отметку стираем, только когда разобрались:
+    /// сняли или прокси уже не наш. Никто ещё не вошёл в Windows — отметка остаётся до следующей попытки.
+    #[cfg(windows)]
+    fn clear_leftover_proxy(&mut self) {
+        let marker = self.paths.data.join("user-proxy.json");
+        // VPN уже включили заново — прокси снова наш и нужен.
+        if self.vpn != VpnState::Off || self.proxy_applied {
+            return;
+        }
+        let Some(saved) = std::fs::read(&marker).ok().and_then(|b| serde_json::from_slice::<userproxy::Saved>(&b).ok()) else { return };
+        match userproxy::clear(self.profile.mixed_port, Some(saved)) {
+            userproxy::Cleared::NoUser => {}
+            result => {
+                if result == userproxy::Cleared::Done {
+                    tracing::info!("снят оставшийся системный прокси kl!ck");
+                }
+                let _ = std::fs::remove_file(&marker);
+            }
+        }
+    }
+
     async fn clear_proxy(&mut self) {
         if self.proxy_applied {
             self.emit(Event::ProxyClear);
@@ -1178,8 +1219,17 @@ impl Engine {
             self.netconf_proxy(None).await;
             #[cfg(windows)]
             if let Some(saved) = self.user_proxy_saved.take() {
-                if userproxy::clear(self.profile.mixed_port, Some(saved)) {
-                    tracing::info!("системный прокси пользователя сняла служба");
+                match userproxy::clear(self.profile.mixed_port, Some(saved.clone())) {
+                    // Пользователь уже вышел (выключение компьютера) — отметка остаётся,
+                    // прокси снимем после следующего входа.
+                    userproxy::Cleared::NoUser => {
+                        if let Ok(bytes) = serde_json::to_vec(&saved) {
+                            let _ = storage::write_atomic(&self.paths.data.join("user-proxy.json"), &bytes);
+                        }
+                        return;
+                    }
+                    userproxy::Cleared::Done => tracing::info!("системный прокси пользователя сняла служба"),
+                    userproxy::Cleared::NotOurs => {}
                 }
                 let _ = std::fs::remove_file(self.paths.data.join("user-proxy.json"));
             }
@@ -1211,14 +1261,29 @@ impl Engine {
 
     async fn apply_selected_server(&mut self) {
         let Some(api) = self.api() else { return };
+        // Сразу после запуска или перечитывания конфига серверы провайдера бывают ещё не загружены:
+        // в группе тогда только заглушка ядра COMPATIBLE. Выбирать и запоминать можно лишь настоящие.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let names = loop {
+            let names: Vec<String> = api.provider_proxies(PROVIDER).await.unwrap_or_default().into_iter().map(|(n, _)| n).collect();
+            if !names.is_empty() || Instant::now() >= deadline {
+                break names;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        if names.is_empty() {
+            tracing::warn!("ядро не загрузило серверы подписки за 5 с, выбранный сервер не трогаю");
+            return;
+        }
         let wanted = self.settings.active().and_then(|c| c.selected_server.clone());
-        if let Some(name) = wanted {
-            if api.select(VPN_GROUP, &name).await.is_ok() {
+        if let Some(name) = &wanted {
+            if names.contains(name) && api.select(VPN_GROUP, name).await.is_ok() {
                 return;
             }
             tracing::warn!("сохранённого сервера больше нет в подписке, беру первый");
         }
-        if let Ok(Some(now)) = api.selected(VPN_GROUP).await {
+        let now = api.selected(VPN_GROUP).await.ok().flatten().filter(|n| names.contains(n));
+        if let Some(now) = now.or_else(|| names.first().cloned()) {
             if let Some(c) = self.settings.active_mut() {
                 c.selected_server = Some(now);
             }
@@ -1682,6 +1747,8 @@ impl Engine {
             check_direct_port: 0,
             tun_device: TUN_DEVICE.into(),
             log_level: self.profile.core_log_level.clone(),
+            // У стража нет своих соединений, которые надо было бы отпускать мимо: правило не нужно.
+            core_exe: String::new(),
         };
         let path = self.write_guard_config(&layout, &folders)?;
         let home = self.paths.core_home.join("guard");
@@ -1963,6 +2030,7 @@ impl Engine {
             check_direct_port: 0,
             tun_device: TUN_DEVICE.into(),
             log_level: "warning".into(),
+            core_exe: String::new(),
         };
         let cfg = compile::compile_tester(&layout, &Paths::provider_rel(conn_id));
         let path = self.paths.core_home.join("tester.yaml");
@@ -2063,10 +2131,10 @@ mod tests {
 
     #[test]
     fn versions_compare_as_numbers() {
-        assert!(version_newer("0.10.0", "0.9.4"));
-        assert!(version_newer("1.0.0", "0.9.0"));
-        assert!(!version_newer("0.3.0", "0.9.0"));
-        assert!(!version_newer("0.9.0", "0.9.0"));
-        assert!(version_newer("0.9.1-beta", "0.9.0"));
+        assert!(version_newer("0.4.10", "0.4.9"));
+        assert!(version_newer("1.0.0", "0.4.0"));
+        assert!(!version_newer("0.3.0", "0.4.0"));
+        assert!(!version_newer("0.4.0", "0.4.0"));
+        assert!(version_newer("0.4.1-beta", "0.4.0"));
     }
 }

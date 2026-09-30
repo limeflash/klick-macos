@@ -33,6 +33,32 @@ function Http([string]$exe, [string]$url = 'https://www.gstatic.com/generate_204
     $code = & $exe -s -o NUL -w '%{http_code}' --max-time 12 @extra $url 2>$null
     if ($code) { "$code".Trim() } else { '000' }
 }
+# В образе Песочницы бывает без WebView2 — без него окно kl!ck не открывается («Could not find the
+# WebView2 Runtime»), и проверки окна ложно проваливаются. Ставим официальный загрузчик Microsoft.
+function WebView2Installed {
+    foreach ($k in 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+                   'HKCU:\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}') {
+        $pv = (Get-ItemProperty $k -ErrorAction SilentlyContinue).pv
+        if ($pv -and $pv -ne '0.0.0.0') { return $true }
+    }
+    return $false
+}
+function EnsureWebView2 {
+    if (WebView2Installed) { Log 'WebView2 уже есть'; return }
+    $t0 = Get-Date
+    # Полный установщик, если start.ps1 его положил (sandbox\cache): загрузчик в Песочнице качает
+    # от полутора минут до четверти часа.
+    $f = Join-Path $root 'webview2.exe'
+    if (-not (Test-Path $f)) {
+        $f = Join-Path $env:TEMP 'MicrosoftEdgeWebview2Setup.exe'
+        try { Invoke-WebRequest 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $f -UseBasicParsing } catch { Log "WebView2 не скачался: $($_.Exception.Message)"; return }
+    }
+    $sig = Get-AuthenticodeSignature $f
+    if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') { Log 'WebView2: подпись не Microsoft — не запускаю'; return }
+    # WaitForExit, а не -Wait: -Wait ждёт и фоновые процессы Edge Update, которые остаются жить.
+    [void](Start-Process $f -ArgumentList '/silent', '/install' -PassThru).WaitForExit(600000)
+    Log ("WebView2 поставлен за {0:N0} с: {1}" -f ((Get-Date) - $t0).TotalSeconds, (WebView2Installed))
+}
 function SrvLines { @(Get-Content "$out\srv.log" -ErrorAction SilentlyContinue) }
 function ProxyReg { Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' }
 function CoreProc { Get-CimInstance Win32_Process -Filter "Name='mihomo.exe'" | Where-Object { $_.CommandLine -like '*ProgramData*' } }
@@ -40,6 +66,7 @@ function CoreProc { Get-CimInstance Win32_Process -Filter "Name='mihomo.exe'" | 
 try {
     $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     Log ("Песочница: Windows {0}, права администратора: {1}" -f [Environment]::OSVersion.Version, $admin)
+    EnsureWebView2
 
     # 1. Установка службы
     if ($Preinstalled) {
@@ -138,6 +165,9 @@ try {
     $st = WaitVpn 'connected' 40
     $afterNet = Http 'curl.exe'
     Check 'после смены сети VPN снова работает' ($st.vpn -eq 'connected' -and $afterNet -eq '204') ("vpn={0}, код {1}" -f $st.vpn, $afterNet)
+    # Ядро перечитывает серверы не сразу: служба не должна запомнить его заглушку COMPATIBLE.
+    $saved = @((KlickJson settings).connections | Where-Object { $_.selected_server } | ForEach-Object { $_.selected_server })
+    Check 'после смены сети сервер прежний' ($st.server -eq $working -and $saved -notcontains 'COMPATIBLE') ("сейчас {0}, в настройках: {1}" -f $st.server, ($saved -join ', '))
 
     # 4b. Переключатели России в «Всё через VPN»
     $n0 = (SrvLines).Count
@@ -168,12 +198,15 @@ try {
     # Обычный сайт — не www.gstatic.com: через него служба сама проверяет связь через VPN (PROBE_URL),
     # и её проверка, совпавшая по времени (например, после смены сети), попадала в журнал «сервера».
     $n0 = (SrvLines).Count
-    $sel = Http 'curl.exe' 'https://cp.cloudflare.com/generate_204'
+    # Обычный сайт — не gstatic: через «сервер» его раз в 30 с запрашивает проверка связи самого ядра.
+    $sel = Http 'curl.exe' 'https://www.wikipedia.org/'
     $yt = Http 'curl.exe' 'https://www.youtube.com/generate_204'
     Start-Sleep 1
     $new = SrvLines | Select-Object -Skip $n0
-    Check 'в «Только выбранное» обычный сайт идёт напрямую' ($sel -eq '204' -and -not ($new -match 'cp\.cloudflare')) "код $sel"
-    Check 'сервис из набора заблокированного идёт через VPN' ($yt -eq '204' -and ($new -match 'youtube')) "код $yt"
+    Check 'в «Только выбранное» обычный сайт идёт напрямую' ($sel -match '^(200|301|302)$' -and -not ($new -match 'wikipedia')) "код $sel"
+    # «Сервер» выходит в интернет отсюда же, а заблокированное в РФ отсюда не открывается:
+    # проверяем, что запрос ушёл через «сервер», а не код ответа сайта.
+    Check 'сервис из набора заблокированного идёт через VPN' ([bool]($new -match 'youtube')) "код $yt"
 
     # 6. Kill Switch
     New-Item -ItemType Directory -Force 'C:\kstest' | Out-Null

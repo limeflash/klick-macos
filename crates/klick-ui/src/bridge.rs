@@ -13,6 +13,9 @@ use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 
 #[cfg(windows)]
 const ERROR_PIPE_BUSY: i32 = 231;
+/// Канал рабочей службы (как `klick_proto::PIPE`); служба для разработки — без проверки.
+#[cfg(windows)]
+const WORK_PIPE: &str = r"\\.\pipe\klick";
 
 pub struct Bridge {
     pipe: String,
@@ -31,6 +34,11 @@ async fn open(pipe: &str) -> std::io::Result<NamedPipeClient> {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         match ClientOptions::new().open(pipe) {
+            // Рабочий канал держит служба от имени системы. Кто занял имя раньше неё, — чужой:
+            // ему не отдаём ни ссылки подписок, ни команды.
+            Ok(c) if pipe == WORK_PIPE && !served_by_system(&c) => {
+                return Err(std::io::Error::other("канал kl!ck держит не служба kl!ck"));
+            }
             Ok(c) => return Ok(c),
             Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(30)).await;
@@ -40,6 +48,33 @@ async fn open(pipe: &str) -> std::io::Result<NamedPipeClient> {
     }
 }
 
+/// Канал создала служба kl!ck: его владелец — система или администраторы. Так выглядит канал,
+/// который служба (LocalSystem) создаёт при запуске. Программа обычного пользователя, занявшая имя
+/// раньше службы, владеет своим каналом сама и назначить владельцем систему не может.
+///
+/// Владельца видно любому, кто подключился к каналу: нужно только право READ_CONTROL, а оно входит
+/// в обычный доступ на чтение. Процесс службы при этом не открываем — обычному пользователю Windows
+/// его не откроет, и проверка по процессу отвергла бы настоящую службу.
+#[cfg(windows)]
+fn served_by_system(pipe: &NamedPipeClient) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{LocalFree, HANDLE, HLOCAL};
+    use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
+    use windows::Win32::Security::{IsWellKnownSid, WinBuiltinAdministratorsSid, WinLocalSystemSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID};
+    unsafe {
+        let mut owner = PSID::default();
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        let rc = GetSecurityInfo(HANDLE(pipe.as_raw_handle() as _), SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION, Some(&mut owner), None, None, None, Some(&mut sd));
+        if rc.is_err() || owner.is_invalid() {
+            return false;
+        }
+        let ok = IsWellKnownSid(owner, WinLocalSystemSid).as_bool() || IsWellKnownSid(owner, WinBuiltinAdministratorsSid).as_bool();
+        let _ = LocalFree(HLOCAL(sd.0));
+        ok
+    }
+}
+
+/// macOS: сокет службы лежит в /var/run, куда пишет только root, — занять его имя чужая программа не может.
 #[cfg(unix)]
 async fn open(socket: &str) -> std::io::Result<tokio::net::UnixStream> {
     tokio::net::UnixStream::connect(socket).await
@@ -130,4 +165,41 @@ pub fn start_events(app: AppHandle) {
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     });
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    /// Живая служба kl!ck на этом компьютере — из обычного процесса, без прав администратора
+    /// (так работает окно): `cargo test -p klick-ui live_service -- --ignored`.
+    #[test]
+    #[ignore]
+    fn live_service_pipe_is_trusted() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let c = ClientOptions::new().open(WORK_PIPE).expect("служба kl!ck не запущена");
+            assert!(served_by_system(&c), "канал службы должен пройти проверку");
+        });
+    }
+
+    /// Канал, созданный этим (обычным) процессом, проверку не проходит.
+    #[test]
+    fn own_pipe_is_not_trusted() {
+        use tokio::net::windows::named_pipe::ServerOptions;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let name = format!(r"\\.\pipe\klick-owner-test-{}", std::process::id());
+            let _server = ServerOptions::new().first_pipe_instance(true).create(&name).unwrap();
+            let c = ClientOptions::new().open(&name).unwrap();
+            let elevated = is_elevated();
+            // От администратора с повышенными правами владелец и у своего канала — «Администраторы»:
+            // такой процесс и так может всё. Проверка защищает от обычных программ пользователя.
+            assert_eq!(served_by_system(&c), elevated);
+        });
+    }
+
+    fn is_elevated() -> bool {
+        std::process::Command::new("net").arg("session").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
+    }
 }
